@@ -5,32 +5,19 @@ const path = require("path");
 const lark = require("@larksuiteoapi/node-sdk");
 const { writeIncoming } = require("./queue");
 
+const BRIDGE_MODE = (process.env.BRIDGE_MODE || "ws").toLowerCase();
 const PORT = Number(process.env.PORT || 8787, 10);
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook/feishu";
 
 const encryptKey = process.env.LARK_ENCRYPT_KEY || "";
 const verificationToken = process.env.LARK_VERIFICATION_TOKEN || "";
+const appId = process.env.LARK_APP_ID || "";
+const appSecret = process.env.LARK_APP_SECRET || "";
 
-if (!encryptKey || !verificationToken) {
-  console.error(
-    "[bridge] 请在 feishu-cursor-bridge/.env 中配置 LARK_ENCRYPT_KEY 与 LARK_VERIFICATION_TOKEN（飞书应用 → 事件订阅）",
-  );
-  process.exit(1);
-}
-
-/** @type {import('@larksuiteoapi/node-sdk').Client | null} */
-let client = null;
-if (process.env.LARK_APP_ID && process.env.LARK_APP_SECRET) {
-  const domain =
-    process.env.LARK_USE_LARK_INTERNATIONAL === "1"
-      ? lark.Domain.Lark
-      : lark.Domain.Feishu;
-  client = new lark.Client({
-    appId: process.env.LARK_APP_ID,
-    appSecret: process.env.LARK_APP_SECRET,
-    appType: lark.AppType.SelfBuild,
-    domain,
-  });
+function larkDomain() {
+  return process.env.LARK_USE_LARK_INTERNATIONAL === "1"
+    ? lark.Domain.Lark
+    : lark.Domain.Feishu;
 }
 
 function parseAllowlist() {
@@ -46,11 +33,18 @@ function parseAllowlist() {
 
 const allowlist = parseAllowlist();
 
-const eventDispatcher = new lark.EventDispatcher({
-  encryptKey,
-  verificationToken,
-}).register({
-  "im.message.receive_v1": async (data) => {
+function buildLarkClient() {
+  if (!appId || !appSecret) return null;
+  return new lark.Client({
+    appId,
+    appSecret,
+    appType: lark.AppType.SelfBuild,
+    domain: larkDomain(),
+  });
+}
+
+function createImMessageHandler(client) {
+  return async (data) => {
     const senderType = data.sender?.sender_type || "";
     if (senderType === "app") {
       return {};
@@ -80,47 +74,126 @@ const eventDispatcher = new lark.EventDispatcher({
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
     }
     return {};
-  },
-});
+  };
+}
 
-const server = http.createServer((req, res) => {
-  const pathOnly = (req.url || "").split("?")[0];
-
-  if (req.method === "GET" && pathOnly === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("ok");
-    return;
-  }
-
-  if (pathOnly !== WEBHOOK_PATH) {
+function startHealthOnlyServer() {
+  const server = http.createServer((req, res) => {
+    const pathOnly = (req.url || "").split("?")[0];
+    if (req.method === "GET" && pathOnly === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("ok");
+      return;
+    }
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("not found");
-    return;
+  });
+  server.listen(PORT, () => {
+    console.log(`[bridge] health: http://127.0.0.1:${PORT}/health`);
+  });
+}
+
+function startHttpWebhook(client) {
+  if (!encryptKey || !verificationToken) {
+    console.error(
+      "[bridge] HTTP 模式需要 LARK_ENCRYPT_KEY 与 LARK_VERIFICATION_TOKEN（飞书事件订阅 Webhook）",
+    );
+    process.exit(1);
   }
 
-  const rawUrl = req.url;
-  req.url = WEBHOOK_PATH;
-
-  const adapter = lark.adaptDefault(WEBHOOK_PATH, eventDispatcher, {
-    autoChallenge: true,
+  const eventDispatcher = new lark.EventDispatcher({
+    encryptKey,
+    verificationToken,
+  }).register({
+    "im.message.receive_v1": createImMessageHandler(client),
   });
 
-  adapter(req, res)
-    .catch((err) => {
-      console.error("[bridge] adapter error:", err);
-      if (!res.writableEnded) {
-        res.writeHead(500);
-        res.end("error");
-      }
-    })
-    .finally(() => {
-      req.url = rawUrl;
-    });
-});
+  const server = http.createServer((req, res) => {
+    const pathOnly = (req.url || "").split("?")[0];
 
-server.listen(PORT, () => {
-  console.log(
-    `[bridge] listening http://127.0.0.1:${PORT}${WEBHOOK_PATH}  (GET /health for probe)`,
-  );
+    if (req.method === "GET" && pathOnly === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("ok");
+      return;
+    }
+
+    if (pathOnly !== WEBHOOK_PATH) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("not found");
+      return;
+    }
+
+    const rawUrl = req.url;
+    req.url = WEBHOOK_PATH;
+
+    const adapter = lark.adaptDefault(WEBHOOK_PATH, eventDispatcher, {
+      autoChallenge: true,
+    });
+
+    adapter(req, res)
+      .catch((err) => {
+        console.error("[bridge] adapter error:", err);
+        if (!res.writableEnded) {
+          res.writeHead(500);
+          res.end("error");
+        }
+      })
+      .finally(() => {
+        req.url = rawUrl;
+      });
+  });
+
+  server.listen(PORT, () => {
+    console.log(
+      `[bridge] HTTP Webhook http://127.0.0.1:${PORT}${WEBHOOK_PATH}  (GET /health)`,
+    );
+    console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
+  });
+}
+
+async function startWsMode() {
+  if (!appId || !appSecret) {
+    console.error(
+      "[bridge] 长连接模式需要 LARK_APP_ID 与 LARK_APP_SECRET（与 OpenClaw 飞书插件相同）",
+    );
+    console.error(
+      "[bridge] 飞书后台：事件订阅 → 订阅方式 → 使用长连接接收事件；订阅 im.message.receive_v1",
+    );
+    process.exit(1);
+  }
+
+  const client = buildLarkClient();
+
+  const eventDispatcher = new lark.EventDispatcher({}).register({
+    "im.message.receive_v1": createImMessageHandler(client),
+  });
+
+  const wsClient = new lark.WSClient({
+    appId,
+    appSecret,
+    domain: larkDomain(),
+    loggerLevel: lark.LoggerLevel.info,
+  });
+
+  await wsClient.start({ eventDispatcher });
+
+  if (process.env.BRIDGE_HEALTH_DISABLED !== "1") {
+    startHealthOnlyServer();
+  }
+
+  console.log("[bridge] mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）");
   console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
-});
+}
+
+if (BRIDGE_MODE === "http") {
+  const client = buildLarkClient();
+  startHttpWebhook(client);
+} else if (BRIDGE_MODE === "ws") {
+  startWsMode().catch((e) => {
+    console.error("[bridge] ws start failed:", e);
+    process.exit(1);
+  });
+} else {
+  console.error("[bridge] BRIDGE_MODE 须为 ws 或 http，当前:", BRIDGE_MODE);
+  process.exit(1);
+}
