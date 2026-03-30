@@ -5,9 +5,11 @@ globs: inbox/LATEST.md,inbox/LATEST.json
 
 # 飞书 → Cursor 桥接
 
-桥接服务**不会**自动唤起本 Agent；用户从飞书发消息后，须由用户在 Cursor **主动对话**（例如「处理飞书队列」），你才会看到 `inbox` 更新。
+若项目 `.env` 中 **AUTO_REPLY_ENABLED=1**，桥接会**自动**调大模型 API 回飞书，**不经过**本对话。此时你主要帮用户**改桥接代码 / 调 prompt / 排查模型与飞书权限**。
 
-当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时：
+未开全自动时：用户从飞书发消息后，须由用户在 Cursor **主动对话**（例如「处理飞书队列」），你才会处理 `inbox`。
+
+当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时（通常为半自动或查日志）：
 
 1. 阅读其中「用户发来的内容」与 `chat_id`。
 2. 在仓库或终端中完成用户请求（分析、查文档、写代码等）；需要飞书数据时用 `lark-cli`，并遵循已安装的 `lark-*` skills 与安全规则（`lark-shared`）。

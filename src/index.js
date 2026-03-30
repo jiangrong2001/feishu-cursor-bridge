@@ -3,7 +3,8 @@ require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") }
 const http = require("http");
 const path = require("path");
 const lark = require("@larksuiteoapi/node-sdk");
-const { writeIncoming } = require("./queue");
+const { writeIncoming, parseUserText } = require("./queue");
+const { enqueueAutoReply, validateConfig } = require("./autoReply");
 
 const BRIDGE_MODE = (process.env.BRIDGE_MODE || "ws").toLowerCase();
 const PORT = Number(process.env.PORT || 8787, 10);
@@ -57,6 +58,7 @@ function createImMessageHandler(client) {
     }
 
     const msg = data.message || {};
+    const userText = parseUserText(msg.message_type, msg.content || "");
     const payload = {
       event_id: data.event_id || "",
       chat_id: msg.chat_id || "",
@@ -72,6 +74,11 @@ function createImMessageHandler(client) {
       console.log("[bridge] duplicate event_id, skipped:", payload.event_id);
     } else {
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
+      enqueueAutoReply({
+        client,
+        chatId: payload.chat_id,
+        userText,
+      });
     }
     return {};
   };
@@ -205,6 +212,8 @@ async function startWsMode() {
     startHealthOnlyServer();
   }
 }
+
+validateConfig();
 
 if (BRIDGE_MODE === "http") {
   const client = buildLarkClient();

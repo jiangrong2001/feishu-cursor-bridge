@@ -7,20 +7,22 @@
 ```
 手机飞书 ──发消息──► 飞书云 ──► WebSocket 长连接 ──► 本机桥接服务 (Node)
                                                     │
-                                                    ├─ 写入 inbox/LATEST.md + LATEST.json
-                                                    └─ 可选：通知 + 打开 Cursor
-
-你在 Cursor 里让 Agent 读 LATEST.md、执行任务，并用 lark-cli 把结果发回飞书
+                                                    ├─ 写入 inbox/（日志）
+                                                    ├─ 可选：全自动 → 调大模型 API → 再经飞书 API 发回第二条消息
+                                                    └─ 半自动：用 Cursor 打开仓库，让 Agent 读 LATEST.md + lark-cli 回复
 ```
 
 飞书官方说明：[使用长连接接收事件](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode)。
 
-字节内网文档（若可访问）可作对照：[OpenClaw 飞书对接说明](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)。
+社区参考（长连接思路）：[openclaw-feishu](https://www.npmjs.com/package/openclaw-feishu)。
 
-**限制（诚实说明）**
+**关于「只用 Cursor、又要全自动」**（重要）
 
-- Cursor 没有公开的「远程自动跑 Agent」API；本方案仍是 **把命令落到本地文件**，由你在电脑上打开 Cursor 后处理（可配合 `CURSOR_OPEN_ON_MESSAGE=1`）。
-- 桥接进程需 **长期运行**；机器需能 **访问公网**（用于连飞书 WSS，与「对外提供公网入口」不是一回事）。
+- **Cursor IDE 没有公开的无人值守 Agent API**，无法做到「飞书一来就由 Cursor 进程里那个 Chat 自动思考」而不经过任何其它运行时。
+- **可行且推荐的组合**：用 **Cursor 开发与维护本仓库**；**运行时**由桥接进程在后台调用 **与你所选厂商一致的大模型 HTTP API**（OpenAI 兼容或 Anthropic），自动把回复发回飞书——**不必打开 Cursor 对话**，也**不需要 OpenClaw**。
+- 若用户问题依赖 **本机执行命令**（如「查 CPU」），纯大模型只能文字说明步骤或拒绝编造结果；要自动跑本机命令属于 **高危能力**，本仓库默认不开启（避免飞书消息触发任意命令执行）。
+
+桥接进程需 **长期运行**；机器需能 **访问公网**（连飞书 + 调模型 API）。
 
 ---
 
@@ -46,12 +48,42 @@
 cd feishu-cursor-bridge
 cp .env.example .env
 # 编辑 .env：BRIDGE_MODE=ws，填写 LARK_APP_ID、LARK_APP_SECRET
+# 若要全自动回飞书，再配 AUTO_REPLY 与大模型密钥（见下一节）
 
 npm install
 npm start
 ```
 
 启动后应看到类似：`mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）`。
+
+---
+
+## 2.1 全自动回复（推荐：飞书一发即回，无需开 Cursor）
+
+在 `.env` 中增加（示例为 OpenAI 兼容接口；国内可用自建代理或兼容网关，改 `OPENAI_BASE_URL` 即可）：
+
+```env
+AUTO_REPLY_ENABLED=1
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+# OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+或使用 **Anthropic**：
+
+```env
+AUTO_REPLY_ENABLED=1
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-3-5-haiku-20241022
+```
+
+可选：`AUTO_REPLY_SYSTEM_PROMPT`、`AUTO_REPLY_MAX_TOKENS`、`AUTO_REPLY_TEMPERATURE`。
+
+开启全自动后，会 **跳过** `LARK_AUTO_ACK`（避免与「正在生成回复…」重复）。飞书侧会先后收到：**「正在生成回复…」** → **模型正文**（失败则发错误说明）。
+
+**依赖**：与本机 `LARK_APP_ID` / `LARK_APP_SECRET` 相同，应用需具备 **机器人发消息** 权限（如 `im:message:send_as_bot`）。
 
 健康检查（默认仍监听 `PORT`，仅提供 `/health`）：
 
@@ -113,25 +145,14 @@ LARK_USE_LARK_INTERNATIONAL=1
 
 ### 飞书只有「已收到」、没有后续结果？
 
-这是**最常见误解**，不是桥接坏了。
+- 若 **未开** `AUTO_REPLY_ENABLED=1`：须按半自动流程在 Cursor 里处理 `inbox` 并用 `lark-cli` 回复（见上文「与 Cursor 配合」）。
+- 若 **已开** `AUTO_REPLY_ENABLED=1` 仍无第二条消息：检查 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`、网络能否访问模型 API、桥接日志里的 `[auto-reply]` 报错；并确认飞书应用有发消息权限。
 
-| 环节 | 谁在做 | 是否自动 |
-|------|--------|----------|
-| 收消息、写 `inbox/LATEST.md` | 桥接 `npm start` | 自动 |
-| 飞书里的「已收到…」（若开 `LARK_AUTO_ACK`） | 桥接里的 Node SDK | 自动 |
-| **理解需求、查 CPU、写分析** | **Cursor 里的 Agent** | **不会自动**，须你在 Cursor **发对话**触发 |
-| 把结果发回飞书 | 在 Cursor 里让 Agent **执行** `lark-cli im +messages-send …` | 须在对话里完成 |
-
-**正确操作**：`npm start` 保持运行 → 飞书发话后 → 打开 **Cursor**（工作区为本仓库根目录）→ 对 Agent 说：**「请读取 `inbox/LATEST.md`，按其中用户问题处理，并用 lark-cli 把结果发回飞书」** → 允许 Agent 跑终端命令。
-
-自测发消息是否通畅（本机终端）：
+自测发飞书（本机终端，`chat_id` 见 `inbox/LATEST.json`）：
 
 ```bash
-lark-cli im +messages-send --as bot --chat-id "oc_你的chat_id" --text "Cursor 连通测试" --dry-run
-# 去掉 --dry-run 再发一次真消息
+lark-cli im +messages-send --as bot --chat-id "oc_你的chat_id" --text "测试" --dry-run
 ```
-
-（`chat_id` 见 `inbox/LATEST.json`。）
 
 - **`EADDRINUSE` 端口 8787**：多为上次 `npm start` 未退出。可 `lsof -i :8787` 查看后结束进程，或改 `.env` 的 `PORT`；**长连接模式**下即使跳过 `/health`，收飞书消息仍正常。
 - **长连接连不上 / 无日志**：检查本机网络、防火墙是否拦截出站 WSS；`appId`/`appSecret` 是否正确；应用是否已发布。  

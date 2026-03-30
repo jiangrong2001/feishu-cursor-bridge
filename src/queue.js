@@ -112,7 +112,7 @@ async function writeIncoming(payload, client) {
 
   const md = `# 飞书 → Cursor 命令队列
 
-> **重要**：本文件由桥接服务**自动写入**。\`已收到…\` 那条飞书消息也是桥接发的，**不代表 Cursor 已处理**。\`lark-cli\` **不会**自动执行下面命令——你必须在 **Cursor 里对 Agent 说「处理 inbox/LATEST.md」**，由 Agent 完成任务后在终端执行发消息命令，飞书才会收到**结果**。
+> **说明**：本文件由桥接**自动写入**作日志。若 \`.env\` 里 **AUTO_REPLY_ENABLED=1**，桥接会在后台调用大模型 API 并**自动回复飞书**（无需打开 Cursor）。未开全自动时，须自己在 Cursor 里处理本文件并用 \`lark-cli\` 回飞书。
 
 - 收到时间: ${latestJson.received_at}
 - event_id: \`${eventId || "(无)"}\`
@@ -149,6 +149,7 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
   if (
     client &&
     process.env.LARK_AUTO_ACK === "1" &&
+    process.env.AUTO_REPLY_ENABLED !== "1" &&
     payload.chat_id &&
     userText
   ) {
