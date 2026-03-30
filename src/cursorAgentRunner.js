@@ -269,8 +269,8 @@ function validateCursorAgentConfig() {
     workspaceRoot(),
   );
   if (!process.env.CURSOR_API_KEY) {
-    console.warn(
-      "[bridge] 提示：未设置 CURSOR_API_KEY；若 headless 失败，请执行 agent login 或设置该变量（见 cursor.com/docs/cli）",
+    console.log(
+      "[bridge] 未设置 CURSOR_API_KEY：若本机已执行 agent login，可忽略；否则请 agent login 或设置 CURSOR_API_KEY（见 cursor.com/docs/cli）",
     );
   }
 }
