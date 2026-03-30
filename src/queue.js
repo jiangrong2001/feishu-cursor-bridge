@@ -112,7 +112,7 @@ async function writeIncoming(payload, client) {
 
   const md = `# 飞书 → Cursor 命令队列
 
-> **说明**：本文件由桥接**自动写入**作日志。若 \`.env\` 里 **AUTO_REPLY_ENABLED=1**，桥接会在后台调用大模型 API 并**自动回复飞书**（无需打开 Cursor）。未开全自动时，须自己在 Cursor 里处理本文件并用 \`lark-cli\` 回飞书。
+> **说明**：本文件由桥接**自动写入**作日志。若 \`CURSOR_AGENT_AUTO=1\`，会触发本机 **Cursor Agent CLI**（headless）并把过程摘要推回飞书；若仅 \`AUTO_REPLY_ENABLED=1\` 则走直连大模型 API；都未开启时须手动在 Cursor 里处理并用 \`lark-cli\` 回飞书。
 
 - 收到时间: ${latestJson.received_at}
 - event_id: \`${eventId || "(无)"}\`
@@ -150,6 +150,7 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
     client &&
     process.env.LARK_AUTO_ACK === "1" &&
     process.env.AUTO_REPLY_ENABLED !== "1" &&
+    process.env.CURSOR_AGENT_AUTO !== "1" &&
     payload.chat_id &&
     userText
   ) {

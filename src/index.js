@@ -5,6 +5,23 @@ const path = require("path");
 const lark = require("@larksuiteoapi/node-sdk");
 const { writeIncoming, parseUserText } = require("./queue");
 const { enqueueAutoReply, validateConfig } = require("./autoReply");
+const {
+  enqueueCursorAgent,
+  validateCursorAgentConfig,
+} = require("./cursorAgentRunner");
+
+function validateAutomation() {
+  const ca = process.env.CURSOR_AGENT_AUTO === "1";
+  const llm = process.env.AUTO_REPLY_ENABLED === "1";
+  if (ca && llm) {
+    console.error(
+      "[bridge] CURSOR_AGENT_AUTO 与 AUTO_REPLY_ENABLED 只能开启其一（Cursor Agent CLI vs 直连大模型）",
+    );
+    process.exit(1);
+  }
+  validateCursorAgentConfig();
+  if (!ca) validateConfig();
+}
 
 const BRIDGE_MODE = (process.env.BRIDGE_MODE || "ws").toLowerCase();
 const PORT = Number(process.env.PORT || 8787, 10);
@@ -74,11 +91,19 @@ function createImMessageHandler(client) {
       console.log("[bridge] duplicate event_id, skipped:", payload.event_id);
     } else {
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
-      enqueueAutoReply({
-        client,
-        chatId: payload.chat_id,
-        userText,
-      });
+      if (process.env.CURSOR_AGENT_AUTO === "1") {
+        enqueueCursorAgent({
+          client,
+          chatId: payload.chat_id,
+          userText,
+        });
+      } else {
+        enqueueAutoReply({
+          client,
+          chatId: payload.chat_id,
+          userText,
+        });
+      }
     }
     return {};
   };
@@ -213,7 +238,7 @@ async function startWsMode() {
   }
 }
 
-validateConfig();
+validateAutomation();
 
 if (BRIDGE_MODE === "http") {
   const client = buildLarkClient();

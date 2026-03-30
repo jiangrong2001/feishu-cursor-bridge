@@ -5,9 +5,9 @@ globs: inbox/LATEST.md,inbox/LATEST.json
 
 # 飞书 → Cursor 桥接
 
-若项目 `.env` 中 **AUTO_REPLY_ENABLED=1**，桥接会**自动**调大模型 API 回飞书，**不经过**本对话。此时你主要帮用户**改桥接代码 / 调 prompt / 排查模型与飞书权限**。
-
-未开全自动时：用户从飞书发消息后，须由用户在 Cursor **主动对话**（例如「处理飞书队列」），你才会处理 `inbox`。
+- **CURSOR_AGENT_AUTO=1**：桥接会 `spawn` **Cursor Agent CLI**（`agent -p`，stream-json），并把工具/进度摘要推回飞书；你帮用户装 CLI、配 `CURSOR_API_KEY` / `agent login`、调 `CURSOR_AGENT_WORKSPACE`、排 `agent` 不在 PATH 等。
+- **AUTO_REPLY_ENABLED=1**（与上一项互斥）：直连 OpenAI/Anthropic，无 Agent 工具链。
+- 两者都关：用户须在 Cursor **主动对话**处理 `inbox`。
 
 当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时（通常为半自动或查日志）：
 

@@ -5,24 +5,21 @@
 与 [OpenClaw 飞书插件（openclaw-feishu）](https://www.npmjs.com/package/openclaw-feishu) 同类思路：**本机用 `appId` + `appSecret` 与飞书建立 WebSocket 长连接**，事件由飞书推送到这条出站连接上，**不需要**你提供公网 IP、域名或 ngrok。
 
 ```
-手机飞书 ──发消息──► 飞书云 ──► WebSocket 长连接 ──► 本机桥接服务 (Node)
-                                                    │
-                                                    ├─ 写入 inbox/（日志）
-                                                    ├─ 可选：全自动 → 调大模型 API → 再经飞书 API 发回第二条消息
-                                                    └─ 半自动：用 Cursor 打开仓库，让 Agent 读 LATEST.md + lark-cli 回复
+手机飞书 ──发消息──► 飞书云 ──► WebSocket ──► 桥接 (Node)
+                                              │
+                                              ├─ 写 inbox/（日志）
+                                              ├─ 【推荐】spawn Cursor Agent CLI（headless）
+                                              │      ├─ stream-json 解析 → 摘要推回飞书（可见工具/进度）
+                                              │      └─ Agent 内可跑终端、改代码；收尾用 lark-cli 发最终总结
+                                              ├─ 【备选】直连 OpenAI/Anthropic API（无 Cursor Agent）
+                                              └─ 【手动】只写 inbox，你在 Cursor IDE 里对话 + lark-cli
 ```
 
-飞书官方说明：[使用长连接接收事件](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode)。
+飞书长连接文档：[使用长连接接收事件](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode)。
 
-社区参考（长连接思路）：[openclaw-feishu](https://www.npmjs.com/package/openclaw-feishu)。
+**Cursor Agent CLI（官方）**：[Headless / print 模式](https://cursor.com/docs/cli/headless)、[参数说明](https://cursor.com/docs/cli/reference/parameters)（`agent -p --force --sandbox disabled --output-format stream-json`）。
 
-**关于「只用 Cursor、又要全自动」**（重要）
-
-- **Cursor IDE 没有公开的无人值守 Agent API**，无法做到「飞书一来就由 Cursor 进程里那个 Chat 自动思考」而不经过任何其它运行时。
-- **可行且推荐的组合**：用 **Cursor 开发与维护本仓库**；**运行时**由桥接进程在后台调用 **与你所选厂商一致的大模型 HTTP API**（OpenAI 兼容或 Anthropic），自动把回复发回飞书——**不必打开 Cursor 对话**，也**不需要 OpenClaw**。
-- 若用户问题依赖 **本机执行命令**（如「查 CPU」），纯大模型只能文字说明步骤或拒绝编造结果；要自动跑本机命令属于 **高危能力**，本仓库默认不开启（避免飞书消息触发任意命令执行）。
-
-桥接进程需 **长期运行**；机器需能 **访问公网**（连飞书 + 调模型 API）。
+**说明**：IDE 里的聊天窗不会自动弹出，但 **与 IDE 同源能力的 Agent** 由本机 `agent` 子进程执行，并可把 **工具调用与生成过程** 摘要到飞书；适合你要的「远程下命令 + 看到智能体怎么干」。
 
 ---
 
@@ -47,8 +44,8 @@
 ```bash
 cd feishu-cursor-bridge
 cp .env.example .env
-# 编辑 .env：BRIDGE_MODE=ws，填写 LARK_APP_ID、LARK_APP_SECRET
-# 若要全自动回飞书，再配 AUTO_REPLY 与大模型密钥（见下一节）
+# 编辑 .env：BRIDGE_MODE=ws，LARK_APP_ID / LARK_APP_SECRET
+# 推荐：CURSOR_AGENT_AUTO=1（见 2.1）
 
 npm install
 npm start
@@ -58,45 +55,51 @@ npm start
 
 ---
 
-## 2.1 全自动回复（推荐：飞书一发即回，无需开 Cursor）
+## 2.1 飞书 ↔ 真 Cursor Agent（全自动 + 过程可见）
 
-在 `.env` 中增加（示例为 OpenAI 兼容接口；国内可用自建代理或兼容网关，改 `OPENAI_BASE_URL` 即可）：
+1. 安装 CLI：`curl https://cursor.com/install -fsS | bash`，确保 `agent -h` 可用。  
+2. `agent login` 或设置 **`CURSOR_API_KEY`**。  
+3. 配置 **`lark-cli`**（与机器人同应用），便于 Agent 收尾执行 `lark-cli im +messages-send`。  
+4. `.env`（**勿**与 `AUTO_REPLY_ENABLED` 同开）：
+
+```env
+CURSOR_AGENT_AUTO=1
+CURSOR_AGENT_SANDBOX=disabled
+# CURSOR_AGENT_WORKSPACE=/你的/工作区
+# CURSOR_AGENT_FEISHU_MIN_INTERVAL_MS=5000
+```
+
+5. `npm start`，飞书发消息 → 收到引导语、🔧 工具摘要、📝 正文节流片段、结束提示；**最终总结**由 Agent 按提示执行 **lark-cli** 发出。
+
+官方文档：[Headless CLI](https://cursor.com/docs/cli/headless)、[Parameters](https://cursor.com/docs/cli/reference/parameters)。
+
+---
+
+## 2.2 备选：直连大模型（非 Cursor Agent）
+
+与 `CURSOR_AGENT_AUTO` **二选一**。
 
 ```env
 AUTO_REPLY_ENABLED=1
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
-# OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-或使用 **Anthropic**：
-
-```env
-AUTO_REPLY_ENABLED=1
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-3-5-haiku-20241022
-```
-
-可选：`AUTO_REPLY_SYSTEM_PROMPT`、`AUTO_REPLY_MAX_TOKENS`、`AUTO_REPLY_TEMPERATURE`。
-
-开启全自动后，会 **跳过** `LARK_AUTO_ACK`（避免与「正在生成回复…」重复）。飞书侧会先后收到：**「正在生成回复…」** → **模型正文**（失败则发错误说明）。
-
-**依赖**：与本机 `LARK_APP_ID` / `LARK_APP_SECRET` 相同，应用需具备 **机器人发消息** 权限（如 `im:message:send_as_bot`）。
-
-健康检查（默认仍监听 `PORT`，仅提供 `/health`）：
-
-```bash
-curl -s http://127.0.0.1:8787/health
-# 应输出 ok
-```
-
-若不需要 HTTP 探测，可在 `.env` 设置 `BRIDGE_HEALTH_DISABLED=1`。
+开启后会发「正在生成回复…」再发模型正文。适合只要简单问答、不要本机工具链的场景。
 
 ---
 
-## 3. 与 Cursor 配合
+## 健康检查
+
+```bash
+curl -s http://127.0.0.1:8787/health
+```
+
+可设 `BRIDGE_HEALTH_DISABLED=1` 关闭 HTTP 探测。
+
+---
+
+## 3. 与 Cursor IDE 配合（半自动 / 开发）
 
 1. 用手机飞书给机器人发**单聊**，或在群里 **@机器人**（视权限而定）。  
 2. 用 **Cursor 打开本仓库根目录**，加载 `.cursor/rules/feishu-bridge.mdc`；Agent 关注 `inbox/LATEST.md`。  
