@@ -4,6 +4,7 @@
  */
 
 const { spawn } = require("child_process");
+const { envTruthy } = require("./envFlags");
 const readline = require("readline");
 const path = require("path");
 
@@ -246,7 +247,7 @@ async function drain() {
 }
 
 function enqueueCursorAgent(p) {
-  if (process.env.CURSOR_AGENT_AUTO !== "1") return;
+  if (!envTruthy("CURSOR_AGENT_AUTO")) return;
   if (!p.client || !p.chatId || !p.userText || !String(p.userText).trim()) return;
   q.push(p);
   setImmediate(() => {
@@ -255,7 +256,7 @@ function enqueueCursorAgent(p) {
 }
 
 function validateCursorAgentConfig() {
-  if (process.env.CURSOR_AGENT_AUTO !== "1") return;
+  if (!envTruthy("CURSOR_AGENT_AUTO")) return;
   if (!process.env.LARK_APP_ID || !process.env.LARK_APP_SECRET) {
     console.error(
       "[bridge] CURSOR_AGENT_AUTO=1 需要 LARK_APP_ID / LARK_APP_SECRET",

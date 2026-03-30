@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { spawn } = require("child_process");
+const { envTruthy } = require("./envFlags");
 
 function inboxDir() {
   return process.env.INBOX_DIR || path.join(__dirname, "..", "inbox");
@@ -149,8 +150,8 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
   if (
     client &&
     process.env.LARK_AUTO_ACK === "1" &&
-    process.env.AUTO_REPLY_ENABLED !== "1" &&
-    process.env.CURSOR_AGENT_AUTO !== "1" &&
+    !envTruthy("AUTO_REPLY_ENABLED") &&
+    !envTruthy("CURSOR_AGENT_AUTO") &&
     payload.chat_id &&
     userText
   ) {
@@ -161,7 +162,7 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
           receive_id: payload.chat_id,
           msg_type: "text",
           content: JSON.stringify({
-            text: "已记入本机 inbox/LATEST.md。桥接不会自动跑 Cursor：请在本机 Cursor（本仓库）对 AI 说「处理飞书队列」，由 AI 执行 lark-cli 把结果发回飞书。",
+            text: "已记入本机 inbox/LATEST.md。当前为半自动：桥接未开启 Cursor Agent 全自动。若要飞书一发即由本机 agent 执行并回传过程，请在 .env 设置 CURSOR_AGENT_AUTO=1（或 true），安装好 agent CLI 并登录，然后重启 npm start。若继续用手动方式：在本机 Cursor（本仓库）对 AI 说「处理飞书队列」，由 AI 执行 lark-cli 发回飞书。",
           }),
         },
       });

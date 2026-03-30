@@ -108,7 +108,7 @@ curl -s http://127.0.0.1:8787/health
 
 ### 可选：自动「已收到」
 
-`.env` 中已有 `LARK_APP_ID` / `LARK_APP_SECRET` 时，设 `LARK_AUTO_ACK=1` 即可（需发消息权限）。
+`.env` 中已有 `LARK_APP_ID` / `LARK_APP_SECRET` 时，设 `LARK_AUTO_ACK=1` 即可（需发消息权限）。**仅当未开** `CURSOR_AGENT_AUTO` / `AUTO_REPLY_ENABLED` 时才会发这条「半自动」说明；全自动时请关 `LARK_AUTO_ACK` 或保持开启均可（全自动下不会发该条）。启动后请看控制台一行 **`[bridge] 自动化状态:`**，确认是否为 `Cursor Agent CLI=开`。
 
 ### 可选：仅允许指定用户
 

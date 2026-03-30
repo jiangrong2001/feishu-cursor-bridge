@@ -3,6 +3,7 @@
  */
 
 const { complete } = require("./llm");
+const { envTruthy } = require("./envFlags");
 
 const FEISHU_TEXT_MAX = 18000;
 
@@ -66,7 +67,7 @@ async function drain() {
  * @param {{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string }} p
  */
 function enqueueAutoReply(p) {
-  if (process.env.AUTO_REPLY_ENABLED !== "1") return;
+  if (!envTruthy("AUTO_REPLY_ENABLED")) return;
   if (!p.client || !p.chatId || !p.userText || !String(p.userText).trim()) return;
   q.push(p);
   setImmediate(() => {
@@ -75,7 +76,7 @@ function enqueueAutoReply(p) {
 }
 
 function validateConfig() {
-  if (process.env.AUTO_REPLY_ENABLED !== "1") return;
+  if (!envTruthy("AUTO_REPLY_ENABLED")) return;
   if (!process.env.LARK_APP_ID || !process.env.LARK_APP_SECRET) {
     console.error(
       "[bridge] AUTO_REPLY_ENABLED=1 需要 LARK_APP_ID 与 LARK_APP_SECRET（用于向飞书发消息）",

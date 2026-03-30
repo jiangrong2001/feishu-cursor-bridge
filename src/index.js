@@ -9,10 +9,11 @@ const {
   enqueueCursorAgent,
   validateCursorAgentConfig,
 } = require("./cursorAgentRunner");
+const { envTruthy } = require("./envFlags");
 
 function validateAutomation() {
-  const ca = process.env.CURSOR_AGENT_AUTO === "1";
-  const llm = process.env.AUTO_REPLY_ENABLED === "1";
+  const ca = envTruthy("CURSOR_AGENT_AUTO");
+  const llm = envTruthy("AUTO_REPLY_ENABLED");
   if (ca && llm) {
     console.error(
       "[bridge] CURSOR_AGENT_AUTO 与 AUTO_REPLY_ENABLED 只能开启其一（Cursor Agent CLI vs 直连大模型）",
@@ -21,6 +22,9 @@ function validateAutomation() {
   }
   validateCursorAgentConfig();
   if (!ca) validateConfig();
+  console.log(
+    `[bridge] 自动化状态: Cursor Agent CLI=${ca ? "开" : "关"} 直连大模型=${llm ? "开" : "关"}`,
+  );
 }
 
 const BRIDGE_MODE = (process.env.BRIDGE_MODE || "ws").toLowerCase();
@@ -91,7 +95,7 @@ function createImMessageHandler(client) {
       console.log("[bridge] duplicate event_id, skipped:", payload.event_id);
     } else {
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
-      if (process.env.CURSOR_AGENT_AUTO === "1") {
+      if (envTruthy("CURSOR_AGENT_AUTO")) {
         enqueueCursorAgent({
           client,
           chatId: payload.chat_id,
