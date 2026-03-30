@@ -88,6 +88,16 @@ function startHealthOnlyServer() {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("not found");
   });
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(
+        `[bridge] 端口 ${PORT} 已被占用，已跳过 /health（WebSocket 长连接不受影响）。可执行: lsof -i :${PORT} 或修改 .env 的 PORT`,
+      );
+      return;
+    }
+    console.error("[bridge] health 服务异常:", err.message);
+    process.exit(1);
+  });
   server.listen(PORT, () => {
     console.log(`[bridge] health: http://127.0.0.1:${PORT}/health`);
   });
@@ -143,6 +153,17 @@ function startHttpWebhook(client) {
       });
   });
 
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `[bridge] 端口 ${PORT} 已被占用，HTTP Webhook 无法启动。请释放端口或修改 .env 的 PORT`,
+      );
+      process.exit(1);
+    }
+    console.error("[bridge] HTTP 服务异常:", err.message);
+    process.exit(1);
+  });
+
   server.listen(PORT, () => {
     console.log(
       `[bridge] HTTP Webhook http://127.0.0.1:${PORT}${WEBHOOK_PATH}  (GET /health)`,
@@ -177,12 +198,12 @@ async function startWsMode() {
 
   await wsClient.start({ eventDispatcher });
 
+  console.log("[bridge] mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）");
+  console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
+
   if (process.env.BRIDGE_HEALTH_DISABLED !== "1") {
     startHealthOnlyServer();
   }
-
-  console.log("[bridge] mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）");
-  console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
 }
 
 if (BRIDGE_MODE === "http") {
