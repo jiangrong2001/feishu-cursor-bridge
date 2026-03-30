@@ -1,0 +1,19 @@
+---
+description: 处理从手机飞书经桥接服务写入的命令队列（lark-cli 回复）
+globs: inbox/LATEST.md,inbox/LATEST.json
+---
+
+# 飞书 → Cursor 桥接
+
+当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时：
+
+1. 阅读其中「用户发来的内容」与 `chat_id`。
+2. 在仓库或终端中完成用户请求（分析、查文档、写代码等）；需要飞书数据时用 `lark-cli`，并遵循已安装的 `lark-*` skills 与安全规则（`lark-shared`）。
+3. 若用户需要在**手机飞书**看到结果：用 `LATEST.json` 中的 `chat_id`，在终端执行发消息（示例，机器人身份）：
+
+   `lark-cli im +messages-send --as bot --chat-id "<chat_id>" --text "<回复正文>"`
+
+   若需用户身份或群权限，按 `lark-im` / `lark-shared` 调整 `--as` 与 scope。
+4. 不要向用户或日志泄露 appSecret、token；回复前确认用户意图（写操作）。
+
+桥接服务说明见仓库根目录 `README.zh.md`。

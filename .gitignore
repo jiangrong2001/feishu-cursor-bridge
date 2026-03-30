@@ -1,0 +1,5 @@
+node_modules/
+.env
+inbox/*
+!inbox/.gitkeep
+.DS_Store
