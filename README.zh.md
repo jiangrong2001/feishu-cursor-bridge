@@ -111,6 +111,28 @@ LARK_USE_LARK_INTERNATIONAL=1
 
 ## 故障排查
 
+### 飞书只有「已收到」、没有后续结果？
+
+这是**最常见误解**，不是桥接坏了。
+
+| 环节 | 谁在做 | 是否自动 |
+|------|--------|----------|
+| 收消息、写 `inbox/LATEST.md` | 桥接 `npm start` | 自动 |
+| 飞书里的「已收到…」（若开 `LARK_AUTO_ACK`） | 桥接里的 Node SDK | 自动 |
+| **理解需求、查 CPU、写分析** | **Cursor 里的 Agent** | **不会自动**，须你在 Cursor **发对话**触发 |
+| 把结果发回飞书 | 在 Cursor 里让 Agent **执行** `lark-cli im +messages-send …` | 须在对话里完成 |
+
+**正确操作**：`npm start` 保持运行 → 飞书发话后 → 打开 **Cursor**（工作区为本仓库根目录）→ 对 Agent 说：**「请读取 `inbox/LATEST.md`，按其中用户问题处理，并用 lark-cli 把结果发回飞书」** → 允许 Agent 跑终端命令。
+
+自测发消息是否通畅（本机终端）：
+
+```bash
+lark-cli im +messages-send --as bot --chat-id "oc_你的chat_id" --text "Cursor 连通测试" --dry-run
+# 去掉 --dry-run 再发一次真消息
+```
+
+（`chat_id` 见 `inbox/LATEST.json`。）
+
 - **`EADDRINUSE` 端口 8787**：多为上次 `npm start` 未退出。可 `lsof -i :8787` 查看后结束进程，或改 `.env` 的 `PORT`；**长连接模式**下即使跳过 `/health`，收飞书消息仍正常。
 - **长连接连不上 / 无日志**：检查本机网络、防火墙是否拦截出站 WSS；`appId`/`appSecret` 是否正确；应用是否已发布。  
 - **收不到消息**：确认事件订阅为 **长连接** 且已勾选 `im.message.receive_v1`；机器人在会话内；群场景是否需 @。  

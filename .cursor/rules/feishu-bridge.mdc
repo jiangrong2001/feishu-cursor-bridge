@@ -5,6 +5,8 @@ globs: inbox/LATEST.md,inbox/LATEST.json
 
 # 飞书 → Cursor 桥接
 
+桥接服务**不会**自动唤起本 Agent；用户从飞书发消息后，须由用户在 Cursor **主动对话**（例如「处理飞书队列」），你才会看到 `inbox` 更新。
+
 当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时：
 
 1. 阅读其中「用户发来的内容」与 `chat_id`。
