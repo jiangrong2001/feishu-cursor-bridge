@@ -55,15 +55,19 @@ function parseAllowlist() {
 
 const allowlist = parseAllowlist();
 
-/** 飞书可能用不同 event_id 重复投递同一条消息；在 await 前去重，避免并发入队 */
+/**
+ * 飞书可能多次投递；在 await 前去重，避免并发入队。
+ * 重要：message_id 仅在「已解析出非空正文」时才占用。若先收到同 message_id 的空/残缺包再收到正文包，
+ * 过早锁 m: 会导致正文包被误判重复而永远不入队（用户侧常伴随其它「已收到」类自动回复）。
+ */
 const claimedDeliveryKeys = new Set();
 const claimedDeliveryOrder = [];
 const CLAIM_DELIVERY_CAP = 4000;
 
-function tryClaimDelivery(messageId, eventId) {
+function tryClaimDelivery(messageId, eventId, lockMessageId) {
   const keys = [];
-  if (messageId) keys.push(`m:${messageId}`);
   if (eventId) keys.push(`e:${eventId}`);
+  if (lockMessageId && messageId) keys.push(`m:${messageId}`);
   if (keys.length === 0) return true;
   for (const k of keys) {
     if (claimedDeliveryKeys.has(k)) return false;
@@ -105,12 +109,14 @@ function createImMessageHandler(client) {
     const msg = data.message || {};
     const mid = msg.message_id || "";
     const eid = data.event_id || "";
-    if (!tryClaimDelivery(mid, eid)) {
+    const userText = parseUserText(msg.message_type, msg.content || "");
+    const lockMessageId = !!String(userText).trim();
+
+    if (!tryClaimDelivery(mid, eid, lockMessageId)) {
       console.log("[bridge] duplicate delivery skipped (sync):", mid || eid);
       return {};
     }
 
-    const userText = parseUserText(msg.message_type, msg.content || "");
     const payload = {
       event_id: data.event_id || "",
       chat_id: msg.chat_id || "",
