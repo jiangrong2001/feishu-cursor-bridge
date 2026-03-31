@@ -231,6 +231,17 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 git remote add github git@github.com:jiangrong2001/feishu-cursor-bridge.git
 ```
 
+If GitHub uses a **dedicated key** (e.g. `~/.ssh/id_rsa_github`), add this to **`~/.ssh/config`** so `git@github.com` picks the right key:
+
+```text
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_rsa_github
+```
+
+Then run `ssh -T git@github.com` to verify authentication.
+
 **Routine:** push Gitee first, then GitHub. If GitHub fails (network/SSH), the script **still exits successfully** so you can push again later and catch up:
 
 ```bash
