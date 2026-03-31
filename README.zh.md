@@ -1,167 +1,203 @@
-# Feishu → Cursor 桥接（线路 3）
+# Feishu ↔ Cursor 桥接
 
-## 架构说明（默认：长连接，无需公网域名）
+本机运行一个 Node 服务：通过飞书 **WebSocket 长连接**接收消息，**不写公网 URL**；收到后在本机 **spawn Cursor 官方 Agent CLI**（headless）处理任务，并由 **lark-cli** 或桥接 API 把回答发回飞书。  
+能力边界：与你在终端里跑的 `agent` 一致（读改工作区、跑命令等），**不是**飞书云里托管的模型。
 
-与 [OpenClaw 飞书插件（openclaw-feishu）](https://www.npmjs.com/package/openclaw-feishu) 同类思路：**本机用 `appId` + `appSecret` 与飞书建立 WebSocket 长连接**，事件由飞书推送到这条出站连接上，**不需要**你提供公网 IP、域名或 ngrok。
-
-```
-手机飞书 ──发消息──► 飞书云 ──► WebSocket ──► 桥接 (Node)
-                                              │
-                                              ├─ 写 inbox/（日志）
-                                              ├─ 【推荐】spawn Cursor Agent CLI（headless）
-                                              │      ├─ stream-json 解析 → 摘要推回飞书（可见工具/进度）
-                                              │      └─ Agent 内可跑终端、改代码；收尾用 lark-cli 发最终总结
-                                              ├─ 【备选】直连 OpenAI/Anthropic API（无 Cursor Agent）
-                                              └─ 【手动】只写 inbox，你在 Cursor IDE 里对话 + lark-cli
-```
-
-飞书长连接文档：[使用长连接接收事件](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode)。
-
-**Cursor Agent CLI（官方）**：[Headless / print 模式](https://cursor.com/docs/cli/headless)、[参数说明](https://cursor.com/docs/cli/reference/parameters)（`agent -p --force --sandbox disabled --output-format stream-json`）。
-
-**说明**：IDE 里的聊天窗不会自动弹出，但 **与 IDE 同源能力的 Agent** 由本机 `agent` 子进程执行，并可把 **工具调用与生成过程** 摘要到飞书；适合你要的「远程下命令 + 看到智能体怎么干」。
+**官方参考**：[飞书长连接接收事件](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode) · [Cursor Agent CLI](https://cursor.com/docs/cli/headless) · [CLI 参数](https://cursor.com/docs/cli/reference/parameters)
 
 ---
 
-## 1. 飞书开放平台配置（长连接模式）
+## 工作原理（单一路径）
 
-1. 打开 [飞书开放平台](https://open.feishu.cn/app) → 创建**企业自建应用**。
-2. 启用 **机器人** 能力；**版本管理** 中创建版本并发布，使应用在企业内可用。
-3. **权限（示例，按实际需要勾选）**  
-   - 接收用户发给机器人的单聊消息，或  
-   - 群聊中 @ 机器人的消息 等（与 OpenClaw 文档中的 `im:message` / 群 @ 类权限一致即可）。
-4. **事件订阅**（关键步骤）  
-   - 添加事件：**接收消息** `im.message.receive_v1`（控制台若显示 v2.0 以界面为准）。  
-   - **订阅方式** 请选择：**使用长连接接收事件**（不要填「请求地址 URL」的 Webhook 模式，除非你用下文「HTTP 备选」）。  
-5. 在应用凭证页复制 **App ID**（`cli_xxx`）和 **App Secret**，写入本仓库 `.env`。
+```
+手机/桌面飞书 ──► 飞书云 ──► WSS 长连接 ──► 本机桥接 (Node)
+                                                │
+                                                ├─ 写入 inbox/（日志，便于排查）
+                                                └─ spawn `agent -p`（工作区=你的项目）
+                                                    └─ 答复：优先 lark-cli 发回会话；必要时桥接 API 补发
+```
 
-长连接模式下 **不需要** Encrypt Key / Verification Token（那是 Webhook 加密推送用的）。
+启动成功后，控制台应出现：`mode=ws 长连接已启动`、`自动化状态: Cursor Agent CLI=开`。
 
 ---
 
-## 2. 本机安装与启动
+## 使用前清单（按顺序核对）
+
+| 步骤 | 内容 |
+|------|------|
+| 1 | 飞书**企业自建应用**已创建、已发布，机器人已启用 |
+| 2 | 事件订阅为 **使用长连接接收事件**，且已订阅 **接收消息** `im.message.receive_v1` |
+| 3 | 应用具备 **发消息** 等 IM 权限（与「机器人发消息」场景一致） |
+| 4 | 本机已安装 **Node.js**，能执行 `npm install` |
+| 5 | 本机已安装 **Cursor Agent CLI**（`agent -h` 可用），并已 **`agent login`** |
+| 6 | 本机已配置 **lark-cli**，且与上述飞书应用一致（能 `lark-cli im +messages-send --as bot ...`） |
+
+---
+
+## 一、飞书开放平台
+
+1. 打开 [飞书开放平台](https://open.feishu.cn/app) → 创建**企业自建应用**。  
+2. **应用能力**里启用**机器人**；在**版本管理与发布**中发布到企业。  
+3. **权限管理**：按需勾选「读取用户发给机器人的单聊消息」「获取用户在群组中 @ 机器人的消息」等与 IM 接收、机器人发消息相关的权限（以控制台实际名称为准）。  
+4. **事件与回调** → **事件订阅**：  
+   - 添加事件：**接收消息** `im.message.receive_v1`。  
+   - **订阅方式** 选：**使用长连接接收事件**（不要填公网 Webhook URL）。  
+5. 在**凭证与基础信息**复制 **App ID**、**App Secret**，稍后放入 `.env`。
+
+长连接模式**不需要** Encrypt Key / Verification Token。
+
+---
+
+## 二、本机：Cursor CLI 与 lark-cli
 
 ```bash
+# Cursor Agent CLI（官方安装脚本，以 cursor.com 文档为准）
+curl https://cursor.com/install -fsS | bash
+agent -h
+agent login
+```
+
+按你现有方式安装并登录 **lark-cli**（与机器人同一应用），确保能代表机器人发消息，例如：
+
+```bash
+lark-cli auth status
+# 向指定会话发一条测试（chat_id 可从首次桥接后的 inbox/LATEST.json 查看）
+lark-cli im +messages-send --as bot --chat-id "oc_xxx" --text "连通性测试"
+```
+
+---
+
+## 三、配置与启动
+
+```bash
+git clone <本仓库地址>
 cd feishu-cursor-bridge
 cp .env.example .env
-# 编辑 .env：BRIDGE_MODE=ws，LARK_APP_ID / LARK_APP_SECRET
-# 推荐：CURSOR_AGENT_AUTO=1（见 2.1）
+```
 
+**`.env` 最小可用示例**（把占位符换成你的值）：
+
+```env
+BRIDGE_MODE=ws
+LARK_APP_ID=cli_xxxxxxxx
+LARK_APP_SECRET=你的密钥
+
+CURSOR_AGENT_AUTO=1
+CURSOR_AGENT_SANDBOX=disabled
+```
+
+说明：
+
+- **`CURSOR_AGENT_WORKSPACE`**：不填则默认为本仓库根目录；建议改成你真正要让 Agent 改代码的目录（绝对路径）。  
+- **`CURSOR_AGENT_STREAM_TO_FEISHU=1`**：打开后会把工具调用等过程摘要推到飞书；默认关闭，飞书里通常只看到**一条简洁答复**。  
+- **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`**：默认开启；当流式输出里未识别到 `lark-cli` 时，由桥接用 API 补发正文，减少「无回复」。若你确定只要 lark-cli、不要桥接代发，可设为 `0`。  
+- **`CURSOR_AGENT_TIMEOUT_MS`**：单条任务最长毫秒数，超时杀进程；`0` 表示不限制。长任务可设 `600000`（10 分钟）。  
+- **`ALLOWED_SENDER_OPEN_IDS`**：逗号分隔的 `ou_xxx`，仅处理这些发送者，降低被陌生人刷队列的风险。
+
+然后：
+
+```bash
 npm install
 npm start
 ```
 
-启动后应看到类似：`mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）`。
+若提示端口占用：可改 `.env` 里 `PORT`，或结束占用进程；**仅 /health 失败时，长连接仍可正常收消息**。
 
 ---
 
-## 2.1 飞书 ↔ 真 Cursor Agent（全自动 + 过程可见）
+## 四、自测是否成功
 
-1. 安装 CLI：`curl https://cursor.com/install -fsS | bash`，确保 `agent -h` 可用。  
-2. `agent login` 或设置 **`CURSOR_API_KEY`**。  
-3. 配置 **`lark-cli`**（与机器人同应用），便于 Agent 收尾执行 `lark-cli im +messages-send`。  
-4. `.env`（**勿**与 `AUTO_REPLY_ENABLED` 同开）：
+1. 与机器人**单聊**，或在与机器人的**群聊里 @ 机器人**，发一句纯文字，例如：`你好，请用一句话介绍你的工作区路径`。  
+2. 本机终端应出现：`[bridge] queued message`、`[cursor-agent] job start`、`spawn agent`。  
+3. 飞书会话里应在合理时间内出现**一条**来自机器人的文字回复（内容来自 Agent + lark-cli 或桥接补发）。
 
-```env
-CURSOR_AGENT_AUTO=1
-CURSOR_AGENT_SANDBOX=disabled
-# CURSOR_AGENT_WORKSPACE=/你的/工作区
-# 需要过程可见时再开：CURSOR_AGENT_STREAM_TO_FEISHU=1
-# CURSOR_AGENT_FEISHU_MIN_INTERVAL_MS=5000
-```
-
-5. `npm start`，飞书发消息 → **默认「安静模式」**：桥接不把工具/流式正文刷到飞书，由 Agent 执行 **lark-cli** 发简洁答复。若流式输出里**未识别到** `lark-cli` 调用，桥接会用 **API 补发**模型正文，减少「只有自动回复、没有答案」的概率（`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0` 可关）。若要看 🔧📝 过程，设 `CURSOR_AGENT_STREAM_TO_FEISHU=1`。连续多条消息**顺序执行**；可选 `CURSOR_AGENT_TIMEOUT_MS` 防止单条卡死占满队列。
-
-说明：若飞书里出现「已收到，正在本机 Cursor 中处理，请稍候」等句，**本仓库不会发该文案**（多为飞书后台自动回复或其它集成）。若你**同时**发现此后没有 Cursor 真回复：此前版本曾在「空包先占位 message_id」时把后续正文包误判重复；当前已改为**仅在有非空正文时才锁 message_id**，避免该问题。仍建议在飞书里关掉与桥接重复的自动回复，减少干扰。
-
-官方文档：[Headless CLI](https://cursor.com/docs/cli/headless)、[Parameters](https://cursor.com/docs/cli/reference/parameters)。
+若飞书里出现「已收到，正在本机 Cursor 中处理，请稍候」等固定话术：**不是本仓库发送的**，请到飞书后台关闭同类**自动回复**，以免与真实答案混淆。
 
 ---
 
-## 2.2 备选：直连大模型（非 Cursor Agent）
+## 五、对话示例（飞书里长什么样）
 
-与 `CURSOR_AGENT_AUTO` **二选一**。
+以下为**示意**：实际措辞由 Agent 与当轮任务决定；默认「安静模式」下，用户侧通常**一条气泡**就是答案。
 
-```env
-AUTO_REPLY_ENABLED=1
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-```
+**示例 1：环境信息**
 
-开启后会发「正在生成回复…」再发模型正文。适合只要简单问答、不要本机工具链的场景。
+| 角色 | 内容 |
+|------|------|
+| 你 | 当前工作区根目录是哪个文件夹？ |
+| 机器人 | `/Users/you/project/feishu-cursor-bridge`（示意） |
+
+**示例 2：本机命令**
+
+| 角色 | 内容 |
+|------|------|
+| 你 | 查一下本机主磁盘还剩多少可用空间，用一句话回答。 |
+| 机器人 | 主卷剩余约 156GB 可用。（示意） |
+
+**示例 3：改仓库里的文件**
+
+| 角色 | 内容 |
+|------|------|
+| 你 | 在 README 顶部加一行小字：「内部工具，勿对外公开」。 |
+| 机器人 | 已改好 `README.zh.md` 顶部一行。（示意） |
+
+**示例 4：结合 inbox 日志**
+
+| 角色 | 内容 |
+|------|------|
+| 你 | 看一下 inbox 里 LATEST.json 的 user_text，用一句话概括我想让你做什么。 |
+| 机器人 | 你想让我根据最新一条飞书指令做 xxx。（示意） |
+
+群聊里请尽量 **@机器人**，避免消息未投递到应用。
 
 ---
 
-## 健康检查
+## 六、可选：健康检查与国际版
 
 ```bash
-curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:你的PORT/health
+# 期望输出：ok
 ```
 
-可设 `BRIDGE_HEALTH_DISABLED=1` 关闭 HTTP 探测。
+不需要 HTTP 探测时可在 `.env` 设置 `BRIDGE_HEALTH_DISABLED=1`。
 
----
+使用 **Lark 国际版** 时增加：
 
-## 3. 与 Cursor IDE 配合（半自动 / 开发）
-
-1. 用手机飞书给机器人发**单聊**，或在群里 **@机器人**（视权限而定）。  
-2. 用 **Cursor 打开本仓库根目录**，加载 `.cursor/rules/feishu-bridge.mdc`；Agent 关注 `inbox/LATEST.md`。  
-3. `CURSOR_OPEN_ON_MESSAGE=1`（macOS）可在新消息时尝试用 `open -a Cursor` 打开 `LATEST.md`。  
-4. 在 Cursor 里处理队列，并用 `lark-cli` 按 `LATEST.json` 里的 `chat_id` 回复飞书。
-
-### 可选：自动「已收到」
-
-`.env` 中已有 `LARK_APP_ID` / `LARK_APP_SECRET` 时，设 `LARK_AUTO_ACK=1` 即可（需发消息权限）。**仅当未开** `CURSOR_AGENT_AUTO` / `AUTO_REPLY_ENABLED` 时才会发这条「半自动」说明；全自动时请关 `LARK_AUTO_ACK` 或保持开启均可（全自动下不会发该条）。启动后请看控制台一行 **`[bridge] 自动化状态:`**，确认是否为 `Cursor Agent CLI=开`。
-
-### 可选：仅允许指定用户
-
-```
-ALLOWED_SENDER_OPEN_IDS=ou_xxx,ou_yyy
-```
-
----
-
-## 4. 国际版 Lark
-
-```
+```env
 LARK_USE_LARK_INTERNATIONAL=1
 ```
 
 ---
 
-## 5. 备选：HTTP Webhook（需要公网 HTTPS）
+## 七、安全建议
 
-仅当你必须用 Webhook 时：
-
-1. `.env` 设置 `BRIDGE_MODE=http`，并配置 `LARK_ENCRYPT_KEY`、`LARK_VERIFICATION_TOKEN`。  
-2. 飞书事件订阅改为 **请求地址** 模式，使用 ngrok 等：`https://<公网>/webhook/feishu`。  
-3. `npm start` 后按原 Webhook 流程验证 URL。
+- 勿提交 `.env`；定期在飞书后台轮换 **App Secret**。  
+- 生产环境建议配置 **`ALLOWED_SENDER_OPEN_IDS`**。  
+- `CURSOR_AGENT_SANDBOX=disabled` 表示 Agent 可执行终端命令，请只对可信用户、可信工作区使用。
 
 ---
 
-## 6. 安全建议
+## 八、故障排查（按现象）
 
-- 勿将 `.env` 提交到 Git。  
-- `ALLOWED_SENDER_OPEN_IDS` 可减小陌生人刷队列。  
-- 机器人勿拉入不可信大群。
+| 现象 | 处理方向 |
+|------|----------|
+| 启动报错 `CURSOR_AGENT_AUTO 与 AUTO_REPLY_ENABLED` | 当前版本若仍保留旧变量，请**不要**同时开启两者；标准用法只开 `CURSOR_AGENT_AUTO=1`。 |
+| 只有飞书自动回复、没有 Agent 答案 | 关飞书后台无关自动回复；看终端是否有 `[cursor-agent] failed`；确认 `agent login`；确认 `lark-cli` 能发消息。 |
+| `spawn agent` 后很久无回复 | 设 `CURSOR_AGENT_STREAM_TO_FEISHU=1` 看过程；或设 `CURSOR_AGENT_TIMEOUT_MS` 避免卡死占满队列。 |
+| `duplicate delivery skipped` 过多 | 多为正常去重；若误判丢失，升级至已修复「仅在有正文时锁 message_id」的版本。 |
+| 与另一套服务共用同一飞书应用 | 飞书可能对同一应用只投递一条长连接，避免多实例抢事件。 |
 
----
-
-## 故障排查
-
-### 飞书只有「已收到」、没有后续结果？
-
-- 若 **未开** `AUTO_REPLY_ENABLED=1`：须按半自动流程在 Cursor 里处理 `inbox` 并用 `lark-cli` 回复（见上文「与 Cursor 配合」）。
-- 若 **已开** `AUTO_REPLY_ENABLED=1` 仍无第二条消息：检查 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`、网络能否访问模型 API、桥接日志里的 `[auto-reply]` 报错；并确认飞书应用有发消息权限。
-
-自测发飞书（本机终端，`chat_id` 见 `inbox/LATEST.json`）：
+手动验证机器人能否发消息（`chat_id` 来自 `inbox/LATEST.json`）：
 
 ```bash
-lark-cli im +messages-send --as bot --chat-id "oc_你的chat_id" --text "测试" --dry-run
+lark-cli im +messages-send --as bot --chat-id "oc_你的chat_id" --text "手动测试"
 ```
 
-- **`EADDRINUSE` 端口 8787**：多为上次 `npm start` 未退出。可 `lsof -i :8787` 查看后结束进程，或改 `.env` 的 `PORT`；**长连接模式**下即使跳过 `/health`，收飞书消息仍正常。
-- **长连接连不上 / 无日志**：检查本机网络、防火墙是否拦截出站 WSS；`appId`/`appSecret` 是否正确；应用是否已发布。  
-- **收不到消息**：确认事件订阅为 **长连接** 且已勾选 `im.message.receive_v1`；机器人在会话内；群场景是否需 @。  
-- **与 OpenClaw 同时跑同一应用**：飞书对同一应用多客户端会 **随机选一个** 收事件，避免重复挂载。  
-- **Cursor 未弹出**：确认应用名为 `Cursor`；或手动打开 `inbox/LATEST.md`。
+---
+
+## 九、项目内文件说明
+
+| 路径 | 作用 |
+|------|------|
+| `inbox/LATEST.md` / `LATEST.json` | 最新一条飞书指令的日志，便于对照 |
+| `inbox/cmd-*.json` | 历史每条消息的原始字段 |
+| `.cursor/rules/feishu-bridge.mdc` | 在本仓库用 Cursor IDE 开发桥接时的说明（与「飞书全自动」运行无关） |
