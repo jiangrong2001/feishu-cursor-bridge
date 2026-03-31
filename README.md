@@ -301,6 +301,7 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | `.cursor/skills/feishu-cursor-bridge/SKILL.md` | Cursor agent checklist (full doc remains this README) |
 | `.cursor/skills/feishu-cursor-bridge/reference.md` | Environment variable quick reference |
 | `.cursor/rules/feishu-bridge.mdc` | Hints for editing this bridge in Cursor IDE (not required for Feishu auto-run) |
+| `.cursor/rules/opencli.mdc` | **Optional:** notes for third-party [OpenCLI](https://github.com/jackwener/opencli) (e.g. Xiaohongshu); **not** part of the bridge, no code coupling |
 | `scripts/git-push-all.sh` | Push Gitee then GitHub (skips GitHub on failure; retry later) |
 
 ---
