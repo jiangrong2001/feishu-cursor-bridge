@@ -2,6 +2,8 @@
 
 **中文版：[README.zh.md](./README.zh.md)**
 
+**For other Cursor agents:** After cloning, the project skill lives at **`.cursor/skills/feishu-cursor-bridge/`**. Read this **README.md** (or **README.zh.md**) end-to-end for full setup; **SKILL.md** is a short checklist. If no skill is loaded, this README alone is enough to install and run.
+
 Run a small **Node** service on your machine: receive Feishu messages over a **WebSocket long connection**—**no public URL** required. For each message, the bridge **spawns the official Cursor Agent CLI** (headless) in your workspace and sends replies back via **lark-cli** or, when needed, the **bridge’s Feishu API**.
 
 **Scope:** Same capabilities as running `agent` locally (read/edit files, run shell commands, etc.). It is **not** a model hosted inside Feishu’s cloud.
@@ -211,4 +213,6 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | `docs/images/` | Documentation images (Feishu screenshots) |
 | `inbox/LATEST.md` / `LATEST.json` | Latest Feishu command log |
 | `inbox/cmd-*.json` | Per-message raw payloads |
+| `.cursor/skills/feishu-cursor-bridge/SKILL.md` | Cursor agent checklist (full doc remains this README) |
+| `.cursor/skills/feishu-cursor-bridge/reference.md` | Environment variable quick reference |
 | `.cursor/rules/feishu-bridge.mdc` | Hints for editing this bridge in Cursor IDE (not required for Feishu auto-run) |
