@@ -216,3 +216,9 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | `.cursor/skills/feishu-cursor-bridge/SKILL.md` | Cursor agent checklist (full doc remains this README) |
 | `.cursor/skills/feishu-cursor-bridge/reference.md` | Environment variable quick reference |
 | `.cursor/rules/feishu-bridge.mdc` | Hints for editing this bridge in Cursor IDE (not required for Feishu auto-run) |
+
+---
+
+## License
+
+This project is released under the **MIT License**. See [LICENSE](./LICENSE) in the repository root.
