@@ -1,5 +1,7 @@
 # Feishu ↔ Cursor 桥接
 
+**English:** [README.md](./README.md)
+
 本机运行一个 Node 服务：通过飞书 **WebSocket 长连接**接收消息，**不写公网 URL**；收到后在本机 **spawn Cursor 官方 Agent CLI**（headless）处理任务，并由 **lark-cli** 或桥接 API 把回答发回飞书。  
 能力边界：与你在终端里跑的 `agent` 一致（读改工作区、跑命令等），**不是**飞书云里托管的模型。
 
