@@ -216,6 +216,30 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | `.cursor/skills/feishu-cursor-bridge/SKILL.md` | Cursor agent checklist (full doc remains this README) |
 | `.cursor/skills/feishu-cursor-bridge/reference.md` | Environment variable quick reference |
 | `.cursor/rules/feishu-bridge.mdc` | Hints for editing this bridge in Cursor IDE (not required for Feishu auto-run) |
+| `scripts/git-push-all.sh` | Push Gitee then GitHub (skips GitHub on failure; retry later) |
+
+---
+
+## Maintainers: push to Gitee and GitHub
+
+- **Gitee (default `origin`):** `git@gitee.com:jiangrong2001/feishu-cursor-bridge.git`  
+- **GitHub:** `git@github.com:jiangrong2001/feishu-cursor-bridge.git` (remote name `github`)
+
+**One-time** setup on your machine:
+
+```bash
+git remote add github git@github.com:jiangrong2001/feishu-cursor-bridge.git
+```
+
+**Routine:** push Gitee first, then GitHub. If GitHub fails (network/SSH), the script **still exits successfully** so you can push again later and catch up:
+
+```bash
+npm run push:all
+# or
+bash scripts/git-push-all.sh
+```
+
+If `github` is not configured, only `origin` is pushed and the script prints how to add GitHub.
 
 ---
 
