@@ -49,6 +49,11 @@ function minIntervalMs() {
   );
 }
 
+/** 默认关闭：成功时不在飞书刷屏，只依赖 Agent 执行 lark-cli 发一条简洁答复 */
+function streamProgressToFeishu() {
+  return envTruthy("CURSOR_AGENT_STREAM_TO_FEISHU");
+}
+
 function toolBrief(obj) {
   const tc = obj.tool_call;
   if (!tc || typeof tc !== "object") return null;
@@ -58,6 +63,8 @@ function toolBrief(obj) {
     return `写入 ${tc.writeToolCall.args.path}`;
   if (tc.runTerminalCmd?.args?.command)
     return `终端: ${String(tc.runTerminalCmd.args.command).slice(0, 200)}`;
+  if (tc.shellToolCall?.args?.command)
+    return `终端: ${String(tc.shellToolCall.args.command).slice(0, 200)}`;
   const keys = Object.keys(tc);
   if (keys.length) return `工具: ${keys[0]}`;
   return "工具调用";
@@ -85,16 +92,18 @@ function buildPrompt(chatId, userText) {
     "【环境与约束】",
     `- 工作区（--workspace）：${ws}`,
     "- 你可使用 Agent 全部能力：读文件、改代码、在终端执行命令（本场景已声明为高权限自动化）。",
-    "- inbox/ 下有本次任务的 LATEST.md、LATEST.json 可作上下文。",
+    "- inbox/ 下有本次任务的 LATEST.md、LATEST.json（含用户本条原文，以 LATEST.json 的 user_text 为准）。",
     "",
-    "【对飞书可见的进度】",
-    "桥接会解析你在 Cursor Agent CLI 的 stream-json 输出，把工具调用等摘要推送到飞书；请在关键步骤使用明确、可审计的操作。",
+    "【回复飞书（唯一对用户可见的正文）】",
+    "用本机 lark-cli **只发一条**纯文本消息到本会话，**text 里只写直接回答用户问题的内容**：",
+    "- 不要用标题「【最终总结】」、不要写「我是 Auto」「已通过 lark-cli」等元说明；",
+    "- 不要重复多段 Markdown 小节；一句能说清就一句；需要列表时再分行；",
+    "- 若用户问的是本机信息（如磁盘空间），用终端命令查准后把结果写进 text。",
     "",
-    "【收尾】",
-    `任务完成后，请用本机已配置好的 lark-cli 再发一条「最终总结」到同一飞书会话：`,
-    `lark-cli im +messages-send --as bot --chat-id "${chatId}" --text "（最终答复写在这里）"`,
+    `命令模板（把引号内整段换成你的答复正文，注意转义 shell 引号）：`,
+    `lark-cli im +messages-send --as bot --chat-id "${chatId}" --text "在这里只写答案"`,
     "",
-    `（会话 chat_id 已再次确认：${chatId}）`,
+    `chat_id: ${chatId}`,
   ].join("\n");
 }
 
@@ -128,6 +137,7 @@ async function runCursorAgentJob(job) {
   const args = buildSpawnArgs(prompt);
   const cwd = workspaceRoot();
   const minGap = minIntervalMs();
+  const verboseFeishu = streamProgressToFeishu();
   let lastSend = 0;
   let accAssistant = "";
 
@@ -141,15 +151,22 @@ async function runCursorAgentJob(job) {
   };
 
   const sendThrottled = (msg, urgent) => {
+    if (!verboseFeishu) return feishuQ;
     const now = Date.now();
     if (!urgent && now - lastSend < minGap) return feishuQ;
     lastSend = now;
     return safeSend(msg);
   };
 
-  await safeSend(
-    "🤖 已交由本机 Cursor Agent CLI（headless）处理。接下来会推送工具/进度摘要；最终总结由 Agent 执行 lark-cli 发到本会话。",
-  );
+  if (verboseFeishu) {
+    await safeSend(
+      "🤖 已交由本机 Cursor Agent CLI（headless）处理。接下来会推送工具/进度摘要；最终总结由 Agent 执行 lark-cli 发到本会话。",
+    );
+  } else {
+    console.log(
+      "[cursor-agent] 安静模式：成功时由 Agent 通过 lark-cli 单条回复；桥接仅在失败时发飞书。可设 CURSOR_AGENT_STREAM_TO_FEISHU=1 恢复过程推送。",
+    );
+  }
 
   try {
     await new Promise((resolve, reject) => {
@@ -182,14 +199,14 @@ async function runCursorAgentJob(job) {
         const t = obj.type;
         const st = obj.subtype;
 
-        if (t === "tool_call" && st === "started") {
+        if (verboseFeishu && t === "tool_call" && st === "started") {
           const b =
             toolBrief(obj) ||
             `调用 ${Object.keys(obj.tool_call || {}).join(", ") || "未知工具"}`;
           void sendThrottled(`🔧 ${b}`, true);
         }
 
-        if (t === "assistant") {
+        if (verboseFeishu && t === "assistant") {
           const d = extractAssistantDelta(obj);
           if (d) accAssistant += d;
           if (accAssistant.length >= 800) {
@@ -199,7 +216,7 @@ async function runCursorAgentJob(job) {
           }
         }
 
-        if (t === "result") {
+        if (verboseFeishu && t === "result") {
           const ms = obj.duration_ms;
           void sendThrottled(
             `✅ Agent 本轮结束（约 ${ms != null ? ms + "ms" : "未知耗时"}）。若未看到最终总结，请检查 Agent 是否已执行 lark-cli。`,
@@ -229,7 +246,7 @@ async function runCursorAgentJob(job) {
     );
   }
 
-  if (accAssistant.trim()) {
+  if (verboseFeishu && accAssistant.trim()) {
     await safeSend(`📄 末尾输出摘要：\n${accAssistant.slice(-FEISHU_CHUNK_MAX)}`);
   }
 }
@@ -244,6 +261,12 @@ async function drain() {
     }
   } finally {
     draining = false;
+    /** 处理期间若有新任务入队，早退的 drain 不会执行到这里；此处补上第二轮 */
+    if (q.length > 0) {
+      setImmediate(() => {
+        drain().catch((e) => console.error("[cursor-agent] drain:", e.message));
+      });
+    }
   }
 }
 
@@ -271,9 +294,10 @@ function validateCursorAgentConfig() {
     process.exit(1);
   }
   console.log(
-    "[bridge] Cursor Agent CLI 自动模式已开启（sandbox=%s，workspace=%s）",
+    "[bridge] Cursor Agent CLI 自动模式已开启（sandbox=%s，workspace=%s，飞书过程推送=%s）",
     process.env.CURSOR_AGENT_SANDBOX || "disabled",
     workspaceRoot(),
+    envTruthy("CURSOR_AGENT_STREAM_TO_FEISHU") ? "开" : "关（默认安静，仅 lark-cli 答复）",
   );
   if (!process.env.CURSOR_API_KEY) {
     console.log(

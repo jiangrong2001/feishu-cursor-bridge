@@ -66,10 +66,11 @@ npm start
 CURSOR_AGENT_AUTO=1
 CURSOR_AGENT_SANDBOX=disabled
 # CURSOR_AGENT_WORKSPACE=/你的/工作区
+# 需要过程可见时再开：CURSOR_AGENT_STREAM_TO_FEISHU=1
 # CURSOR_AGENT_FEISHU_MIN_INTERVAL_MS=5000
 ```
 
-5. `npm start`，飞书发消息 → 收到引导语、🔧 工具摘要、📝 正文节流片段、结束提示；**最终总结**由 Agent 按提示执行 **lark-cli** 发出。
+5. `npm start`，飞书发消息 → **默认「安静模式」**：桥接不把工具/流式正文刷到飞书，只由 Agent 执行 **lark-cli** 发 **一条简洁答复**（失败时桥接会发错误说明）。若要看 🔧📝 过程，设 `CURSOR_AGENT_STREAM_TO_FEISHU=1`。连续多条消息会**顺序执行**，前一条 Agent 未结束时下一条会在队列里等待（已修复此前「第二条永远不跑」的问题）。
 
 官方文档：[Headless CLI](https://cursor.com/docs/cli/headless)、[Parameters](https://cursor.com/docs/cli/reference/parameters)。
 
