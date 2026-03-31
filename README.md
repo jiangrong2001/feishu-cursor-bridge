@@ -19,7 +19,7 @@ Phone / desktop Feishu ──► Feishu cloud ──► WSS long connection ─�
                                                                       │
                                                                       ├─ Writes inbox/ (logs for debugging)
                                                                       └─ spawn `agent -p` (workspace = your project)
-                                                                          └─ Reply: prefer lark-cli to the chat; bridge API as fallback
+                                                                          └─ Reply: if lark-cli is confirmed delivered, stop; else bridge API fallback (no duplicate)
 ```
 
 After a successful start, the console should show logs such as `mode=ws 长连接已启动` and `Cursor Agent CLI 自动模式已开启`.
@@ -94,9 +94,26 @@ Notes:
 
 - **`CURSOR_AGENT_WORKSPACE`:** If unset, defaults to this repo root; set an **absolute path** to the project you want the agent to edit.  
 - **`CURSOR_AGENT_STREAM_TO_FEISHU=1`:** Streams tool/progress snippets to Feishu; default is off so chats usually show **one concise reply**.  
-- **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`:** On by default; if the stream does not show a `lark-cli` invocation, the bridge may **post the answer via API** to avoid silence. Set to `0` if you want **only** lark-cli.  
-- **`CURSOR_AGENT_TIMEOUT_MS`:** Max milliseconds per task, then the process is killed; `0` = no limit (e.g. use `600000` for 10 minutes).  
-- **`ALLOWED_SENDER_OPEN_IDS`:** Comma-separated `ou_xxx` to only accept messages from trusted users.
+- **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`:** On by default; the bridge posts via **API only when Feishu delivery is not confirmed** (see **“How replies reach Feishu”** below). If `lark-cli` succeeds, the bridge **does not** duplicate. Set to `0` for **lark-cli only** (may occasionally leave Feishu silent).  
+- **`CURSOR_AGENT_TIMEOUT_MS`:** Max milliseconds per task, then the process is killed; `0` = no limit (e.g. use `600000` for 10 minutes). **Validated at startup** (integer, max ~24h).  
+- **`CURSOR_AGENT_MAX_QUEUE`:** Max queued agent jobs; default `30`, max `500`, `0` = unlimited (not for production). **Validated at startup**; when full, new messages are rejected with a short Feishu notice.  
+- **`ALLOWED_SENDER_OPEN_IDS`:** Comma-separated `ou_xxx` to only accept messages from trusted users. See **§7** for `REQUIRE_SENDER_ALLOWLIST`, format validation, and other hardening.  
+- **`BRIDGE_FEISHU_TEXT_MAX_CHARS`:** Max characters for **bridge API** text sends (longer content is truncated); default `3500`, validated range `1`–`100000`. Feishu’s docs cap **text message request bodies around 150KB**; leave headroom for JSON escaping.  
+- **lark-cli / files:** `lark-cli` is invoked by the local Agent, not wrapped by this repo—limits follow **Feishu Open Platform + your CLI version** (e.g. body size, images via upload/`image_key`, files via media APIs). Only **bridge fallback** truncation is configurable here via the variable above.
+
+**How replies reach Feishu (user-visible behavior)**
+
+- **Counted as “delivered”**  
+  - **lark-cli:** Only when the agent stream shows **`tool_call` + `completed`** for a **`lark-cli … +messages-send`** terminal call, with **`result.success`**, **no `result.failure`**, `exitCode` 0, and stdout/interleaved output containing **`"ok":true`** or **`message_id`**. A **`started`** event alone does **not** count.  
+  - **Bridge API:** A successful **`im.message.create`** from the bridge (fallback, errors, queue-full notice, etc.).
+- **Quiet mode (default, no `CURSOR_AGENT_STREAM_TO_FEISHU`)**  
+  - If delivery is **not** confirmed and **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=1`**, the bridge **API-fallback** sends model text (truncated by `BRIDGE_FEISHU_TEXT_MAX_CHARS`; echo-like drafts may be replaced with a short hint).  
+  - If **lark-cli is confirmed delivered**, the bridge **does not** API-fallback (avoids **duplicate** bubbles).  
+  - If still not confirmed, a short **nudge** message may be sent.  
+- **Streaming mode (`CURSOR_AGENT_STREAM_TO_FEISHU=1`)**  
+  - If lark-cli is confirmed delivered, the final **long assistant tail** is **not** pushed to Feishu (reduces duplication).  
+- **Images and files**  
+  - Built into the agent system prompt (not a separate env var): when the user asks to send an **image/screenshot/file**, default to **lark-cli attachments** (e.g. `+messages-send --image`, per your CLI). Do **not** replace with plain text or links only, and do **not** ask the user which channel to use.
 
 Then:
 
@@ -172,6 +189,12 @@ curl -s http://127.0.0.1:YOUR_PORT/health
 
 Set `BRIDGE_HEALTH_DISABLED=1` in `.env` if you do not want the HTTP probe.
 
+**`/health` bind address:** defaults to **`127.0.0.1`** (localhost only). Override if needed:
+
+```env
+BRIDGE_HEALTH_HOST=127.0.0.1
+```
+
 For **Lark (international)**:
 
 ```env
@@ -180,11 +203,67 @@ LARK_USE_LARK_INTERNATIONAL=1
 
 ---
 
-## 7. Security
+## 6.5. Debug logging (optional)
 
-- Do not commit `.env`; rotate **App Secret** periodically in the Feishu console.  
-- Prefer **`ALLOWED_SENDER_OPEN_IDS`** in production.  
-- `CURSOR_AGENT_SANDBOX=disabled` allows shell commands—use only with **trusted users** and **trusted workspaces**.
+Set **`BRIDGE_DEBUG_LOG=1`** in `.env` to write bridge flow events and **full** Cursor Agent `stream-json` output to disk (default **`inbox/debug/`**, usually gitignored—**do not commit**).
+
+| File | Contents |
+|------|----------|
+| **`bridge.log`** | Startup, dedupe, `writeIncoming`, enqueue, handler branches (no full user text). |
+| **`agent-<timestamp>-<message_id>.log`** | Per job: metadata, **full user text**, **full prompt**, spawn bin/cwd/**args JSON**, **every stdout line** plus **pretty-printed JSON** for each object (assistant / tool_call “thinking” trail), **stderr** chunks, timeout/exit, `JOB_SUMMARY`. |
+
+Optional **`BRIDGE_DEBUG_LOG_DIR`**: absolute path to a custom directory. Logs are sensitive—use only for troubleshooting, then disable and delete.
+
+---
+
+## 7. Security hardening and limits (configurable / validated)
+
+On startup, **`src/securityConfig.js`** parses and validates the variables below; **invalid values exit the process**. For production, prefer at least: **allowlist + queue cap + per-job timeout + `/health` on loopback**.
+
+### 7.1 Sender allowlist (strongly recommended)
+
+| Variable | Default | Behavior |
+|----------|---------|----------|
+| **`ALLOWED_SENDER_OPEN_IDS`** | empty | Comma-separated Feishu user `open_id` (`ou_...`). If unset, **anyone who can chat with the bot** can trigger the local agent; a **security warning** is printed unless silenced below. |
+| **`REQUIRE_SENDER_ALLOWLIST`** | off | If `1`/`true`/`on`: **`ALLOWED_SENDER_OPEN_IDS` must be non-empty** or startup **fails**. |
+| **`VALIDATE_SENDER_OPEN_ID_FORMAT`** | off | If `1`: each allowlist entry must match the usual `ou_...` pattern or startup **fails**. |
+| **`BRIDGE_SILENCE_INSECURE_ALLOWLIST_WARNING`** | off | If `1`: do not print the “no allowlist” warning (dev convenience only; **do not use in production**). |
+
+### 7.2 Agent queue and timeout
+
+| Variable | Default | Validation |
+|----------|---------|------------|
+| **`CURSOR_AGENT_MAX_QUEUE`** | `30` | Integer `0`–`500`. Invalid or over cap → startup fails. **`0` = unlimited** (easy to overload; **avoid in production**). When full, new work is **not enqueued** and the user gets a short Feishu message. |
+| **`CURSOR_AGENT_TIMEOUT_MS`** | `0` | Integer `0`–~**86400000** (24h). **`0` = no limit** per job; non-zero kills the agent with **SIGTERM** at deadline. Invalid or over cap → startup fails. |
+
+### 7.3 Health endpoint and strict config
+
+| Variable | Default | Behavior |
+|----------|---------|----------|
+| **`BRIDGE_HEALTH_HOST`** | `127.0.0.1` | Address for `/health`. Default is loopback only; binding to e.g. `0.0.0.0` prints a **security warning** at startup. |
+| **`BRIDGE_STRICT_CONFIG`** | off | If `1`: if **`CURSOR_AGENT_BIN` is an absolute path**, the file must exist; if **`CURSOR_AGENT_WORKSPACE`** is set, the directory must exist. Otherwise startup **fails**. |
+
+### 7.4 Related settings (see above)
+
+- **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`:** In quiet mode, API fallback runs **only if lark-cli success is not confirmed**; set `0` if model text must never go via API (may rarely leave Feishu silent).  
+- **`CURSOR_AGENT_SANDBOX=disabled`:** Shell access—pair with **minimal workspace**, **low-privilege OS user**, and **allowlist**.  
+- Do not commit **`.env`**; rotate **App Secret**; consider `chmod 600` on `.env`.
+
+### 7.5 Example hardened `.env` snippet
+
+```env
+REQUIRE_SENDER_ALLOWLIST=1
+ALLOWED_SENDER_OPEN_IDS=ou_xxxx,ou_yyyy
+VALIDATE_SENDER_OPEN_ID_FORMAT=1
+
+CURSOR_AGENT_MAX_QUEUE=20
+CURSOR_AGENT_TIMEOUT_MS=600000
+
+BRIDGE_HEALTH_HOST=127.0.0.1
+BRIDGE_STRICT_CONFIG=1
+
+CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0
+```
 
 ---
 
@@ -194,9 +273,14 @@ LARK_USE_LARK_INTERNATIONAL=1
 |---------|------------|
 | Startup error asking for `CURSOR_AGENT_AUTO=1` | Set `CURSOR_AGENT_AUTO=1` in `.env` and restart. |
 | Only Feishu auto-reply, no agent answer | Disable irrelevant auto-replies; check `[cursor-agent] failed` in the terminal; confirm `agent login` and `lark-cli` sends. |
-| Long silence after `spawn agent` | Set `CURSOR_AGENT_STREAM_TO_FEISHU=1` to see progress, or `CURSOR_AGENT_TIMEOUT_MS` so one job cannot block the queue forever. |
+| Long silence after `spawn agent` | Set `CURSOR_AGENT_STREAM_TO_FEISHU=1` to see progress, or `CURSOR_AGENT_TIMEOUT_MS`; avoid `CURSOR_AGENT_MAX_QUEUE=0` unless you understand unbounded queuing. |
+| Startup: must configure `ALLOWED_SENDER_OPEN_IDS` | You set `REQUIRE_SENDER_ALLOWLIST=1` without an allowlist; fill it or turn the flag off. |
+| Startup: `CURSOR_AGENT_MAX_QUEUE` / `TIMEOUT` invalid | Value out of range or not an integer; see §7. |
+| Feishu says queue is full | Pending jobs reached `CURSOR_AGENT_MAX_QUEUE`; wait or raise the cap (max 500). |
 | Many `duplicate delivery skipped` lines | Usually normal deduping; if you lose real messages, use a build that only locks `message_id` when body text is non-empty. |
 | Another service shares the same Feishu app | Feishu may deliver events to one long connection only—avoid multiple consumers fighting for the same app. |
+| `lark-cli` appears in logs but Feishu has no message | Open `inbox/debug/agent-*.log` → `JOB_SUMMARY`: if `larkCliFeishuOk` is `false`, the bridge should API-fallback; if still empty, check app permissions, `lark-cli`, network; inspect `tool_call` **completed** for `result.failure`. |
+| Trace why the agent replied that way | Set `BRIDGE_DEBUG_LOG=1`, restart; see §6.5 and `JOB_SUMMARY`. |
 
 Manual send test (`chat_id` from `inbox/LATEST.json`):
 
@@ -213,6 +297,7 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | `docs/images/` | Documentation images (Feishu screenshots) |
 | `inbox/LATEST.md` / `LATEST.json` | Latest Feishu command log |
 | `inbox/cmd-*.json` | Per-message raw payloads |
+| `inbox/debug/` | When `BRIDGE_DEBUG_LOG=1`: `bridge.log` and per-job `agent-*.log` |
 | `.cursor/skills/feishu-cursor-bridge/SKILL.md` | Cursor agent checklist (full doc remains this README) |
 | `.cursor/skills/feishu-cursor-bridge/reference.md` | Environment variable quick reference |
 | `.cursor/rules/feishu-bridge.mdc` | Hints for editing this bridge in Cursor IDE (not required for Feishu auto-run) |

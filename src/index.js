@@ -9,6 +9,12 @@ const {
   validateCursorAgentConfig,
 } = require("./cursorAgentRunner");
 const { envTruthy } = require("./envFlags");
+const {
+  validateSecurityAndLimits,
+  healthBindHost,
+} = require("./securityConfig");
+const { validateFeishuMessageLimits } = require("./feishuMessageLimits");
+const { bridgeDebug } = require("./agentDebugLog");
 
 function validateStartup() {
   if (!envTruthy("CURSOR_AGENT_AUTO")) {
@@ -17,6 +23,8 @@ function validateStartup() {
     );
     process.exit(1);
   }
+  validateSecurityAndLimits();
+  validateFeishuMessageLimits();
   validateCursorAgentConfig();
 }
 
@@ -84,12 +92,14 @@ function createImMessageHandler(client) {
   return async (data) => {
     const senderType = data.sender?.sender_type || "";
     if (senderType === "app") {
+      bridgeDebug("im.message handler skip sender_type=app");
       return {};
     }
 
     const openId = data.sender?.sender_id?.open_id || "";
     if (allowlist && openId && !allowlist.has(openId)) {
       console.warn("[bridge] ignored sender (not in allowlist):", openId);
+      bridgeDebug(`im.message handler skip allowlist open_id=${openId}`);
       return {};
     }
 
@@ -101,6 +111,9 @@ function createImMessageHandler(client) {
 
     if (!tryClaimDelivery(mid, eid, lockMessageId)) {
       console.log("[bridge] duplicate delivery skipped (sync):", mid || eid);
+      bridgeDebug(
+        `handler skip duplicate_claim message_id=${mid || ""} event_id=${eid || ""}`,
+      );
       return {};
     }
 
@@ -119,11 +132,15 @@ function createImMessageHandler(client) {
       console.log("[bridge] duplicate event_id, skipped:", payload.event_id);
     } else {
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
+      bridgeDebug(
+        `handler write_incoming_ok message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""} open_id=${openId}`,
+      );
       enqueueCursorAgent({
         client,
         chatId: payload.chat_id,
         userText,
         messageId: payload.message_id || "",
+        senderOpenId: openId,
       });
     }
     return {};
@@ -151,8 +168,13 @@ function startHealthOnlyServer() {
     console.error("[bridge] health 服务异常:", err.message);
     process.exit(1);
   });
-  server.listen(PORT, () => {
-    console.log(`[bridge] health: http://127.0.0.1:${PORT}/health`);
+  const bindHost = healthBindHost();
+  server.listen(PORT, bindHost, () => {
+    const hostForUrl =
+      bindHost.includes(":") && !bindHost.startsWith("[")
+        ? `[${bindHost}]`
+        : bindHost;
+    console.log(`[bridge] health: http://${hostForUrl}:${PORT}/health`);
   });
 }
 
@@ -181,6 +203,7 @@ async function startWsMode() {
 
   await wsClient.start({ eventDispatcher });
 
+  bridgeDebug("ws_client started (im.message.receive_v1 registered)");
   console.log("[bridge] mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）");
   console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
 
@@ -190,6 +213,7 @@ async function startWsMode() {
 }
 
 validateStartup();
+bridgeDebug("startup ok, entering startWsMode");
 
 startWsMode().catch((e) => {
   console.error("[bridge] ws start failed:", e);

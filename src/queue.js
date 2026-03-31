@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { spawn } = require("child_process");
+const { bridgeDebug } = require("./agentDebugLog");
 
 function inboxDir() {
   return process.env.INBOX_DIR || path.join(__dirname, "..", "inbox");
@@ -92,6 +93,9 @@ async function writeIncoming(payload) {
   const eventId =
     payload.event_id || payload.message_id || `noid-${Date.now()}`;
   if (await alreadySeen(dir, eventId)) {
+    bridgeDebug(
+      `writeIncoming skip duplicate event_id=${eventId} message_id=${payload.message_id || ""}`,
+    );
     return { duplicate: true };
   }
 
@@ -141,6 +145,10 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
   await appendSeen(dir, eventId);
 
   openInCursor(path.join(dir, "LATEST.md"));
+
+  bridgeDebug(
+    `writeIncoming ok file=${base}.json message_id=${payload.message_id || ""} user_text_len=${String(userText).length}`,
+  );
 
   return { duplicate: false };
 }
