@@ -152,6 +152,7 @@ function startHttpWebhook(client) {
     verificationToken,
   }).register({
     "im.message.receive_v1": createImMessageHandler(client),
+    "im.message.message_read_v1": () => ({}),
   });
 
   const server = http.createServer((req, res) => {
@@ -223,6 +224,7 @@ async function startWsMode() {
 
   const eventDispatcher = new lark.EventDispatcher({}).register({
     "im.message.receive_v1": createImMessageHandler(client),
+    "im.message.message_read_v1": () => ({}),
   });
 
   const wsClient = new lark.WSClient({

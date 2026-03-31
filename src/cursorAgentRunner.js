@@ -153,73 +153,74 @@ async function runCursorAgentJob(job) {
 
   try {
     await new Promise((resolve, reject) => {
-    const child = spawn(bin, args, {
-      cwd,
-      env: { ...process.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+      console.log(`[cursor-agent] spawn ${bin} cwd=${cwd}`);
+      const child = spawn(bin, args, {
+        cwd,
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
-    let stderrBuf = "";
+      let stderrBuf = "";
 
-    child.stderr?.on("data", (ch) => {
-      stderrBuf += ch.toString();
-      if (stderrBuf.length > 8000) stderrBuf = stderrBuf.slice(-4000);
-    });
+      child.stderr?.on("data", (ch) => {
+        stderrBuf += ch.toString();
+        if (stderrBuf.length > 8000) stderrBuf = stderrBuf.slice(-4000);
+      });
 
-    const rl = readline.createInterface({ input: child.stdout });
+      const rl = readline.createInterface({ input: child.stdout });
 
-    rl.on("line", (line) => {
-      const s = line.trim();
-      if (!s.startsWith("{")) return;
-      let obj;
-      try {
-        obj = JSON.parse(s);
-      } catch {
-        return;
-      }
-
-      const t = obj.type;
-      const st = obj.subtype;
-
-      if (t === "tool_call" && st === "started") {
-        const b =
-          toolBrief(obj) ||
-          `调用 ${Object.keys(obj.tool_call || {}).join(", ") || "未知工具"}`;
-        void sendThrottled(`🔧 ${b}`, true);
-      }
-
-      if (t === "assistant") {
-        const d = extractAssistantDelta(obj);
-        if (d) accAssistant += d;
-        if (accAssistant.length >= 800) {
-          const tail = accAssistant.slice(-600);
-          void sendThrottled(`📝 …${tail}`, false);
-          accAssistant = "";
+      rl.on("line", (line) => {
+        const s = line.trim();
+        if (!s.startsWith("{")) return;
+        let obj;
+        try {
+          obj = JSON.parse(s);
+        } catch {
+          return;
         }
-      }
 
-      if (t === "result") {
-        const ms = obj.duration_ms;
-        void sendThrottled(
-          `✅ Agent 本轮结束（约 ${ms != null ? ms + "ms" : "未知耗时"}）。若未看到最终总结，请检查 Agent 是否已执行 lark-cli。`,
-          true,
-        );
-      }
-    });
+        const t = obj.type;
+        const st = obj.subtype;
 
-    child.on("error", (err) => {
-      reject(err);
-    });
+        if (t === "tool_call" && st === "started") {
+          const b =
+            toolBrief(obj) ||
+            `调用 ${Object.keys(obj.tool_call || {}).join(", ") || "未知工具"}`;
+          void sendThrottled(`🔧 ${b}`, true);
+        }
 
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else
-        reject(
-          new Error(
-            `agent 退出码 ${code}${stderrBuf ? `: ${stderrBuf.slice(-500)}` : ""}`,
-          ),
-        );
-    });
+        if (t === "assistant") {
+          const d = extractAssistantDelta(obj);
+          if (d) accAssistant += d;
+          if (accAssistant.length >= 800) {
+            const tail = accAssistant.slice(-600);
+            void sendThrottled(`📝 …${tail}`, false);
+            accAssistant = "";
+          }
+        }
+
+        if (t === "result") {
+          const ms = obj.duration_ms;
+          void sendThrottled(
+            `✅ Agent 本轮结束（约 ${ms != null ? ms + "ms" : "未知耗时"}）。若未看到最终总结，请检查 Agent 是否已执行 lark-cli。`,
+            true,
+          );
+        }
+      });
+
+      child.on("error", (err) => {
+        reject(err);
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) resolve();
+        else
+          reject(
+            new Error(
+              `agent 退出码 ${code}${stderrBuf ? `: ${stderrBuf.slice(-500)}` : ""}`,
+            ),
+          );
+      });
     });
   } catch (e) {
     console.error("[cursor-agent] failed:", e.message);
@@ -248,8 +249,14 @@ async function drain() {
 
 function enqueueCursorAgent(p) {
   if (!envTruthy("CURSOR_AGENT_AUTO")) return;
-  if (!p.client || !p.chatId || !p.userText || !String(p.userText).trim()) return;
+  if (!p.client || !p.chatId || !p.userText || !String(p.userText).trim()) {
+    console.warn(
+      "[cursor-agent] 未启动 Agent：消息里没有可解析的纯文本（请发文字消息，勿仅图片/卡片）",
+    );
+    return;
+  }
   q.push(p);
+  console.log("[cursor-agent] 已入队，即将推飞书并开始", agentBin());
   setImmediate(() => {
     drain().catch((e) => console.error("[cursor-agent] drain:", e.message));
   });
