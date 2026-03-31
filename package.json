@@ -8,7 +8,7 @@
     "test": "node --check src/envFlags.js && node --check src/index.js && node --check src/queue.js && node --check src/cursorAgentRunner.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "Xeru",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
