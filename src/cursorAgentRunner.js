@@ -10,9 +10,27 @@ const path = require("path");
 
 const FEISHU_CHUNK_MAX = 3500;
 
-/** @type {Array<{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string }>} */
+/** @type {Array<{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string; messageId?: string }>} */
 const q = [];
 let draining = false;
+let activeAgentJobs = 0;
+
+/** 未显式关闭时默认开启：安静模式下若未检测到 lark-cli 发信，则由桥接补发（避免飞书空白） */
+function quietBridgeFallback() {
+  const raw = process.env.CURSOR_AGENT_QUIET_BRIDGE_FALLBACK;
+  if (raw === undefined || raw === "") return true;
+  return envTruthy("CURSOR_AGENT_QUIET_BRIDGE_FALLBACK");
+}
+
+function toolCallMentionsLarkCli(obj) {
+  const tc = obj.tool_call;
+  if (!tc || typeof tc !== "object") return false;
+  const cmds = [
+    tc.runTerminalCmd?.args?.command,
+    tc.shellToolCall?.args?.command,
+  ].filter(Boolean);
+  return cmds.some((c) => /lark-cli|messages-send/i.test(String(c)));
+}
 
 function truncateFeishu(text) {
   const s = String(text);
@@ -131,7 +149,16 @@ function buildSpawnArgs(prompt) {
 }
 
 async function runCursorAgentJob(job) {
-  const { client, chatId, userText } = job;
+  const { client, chatId, userText, messageId } = job;
+  activeAgentJobs++;
+  if (activeAgentJobs > 1) {
+    console.error(
+      "[cursor-agent] 警告：检测到并发 Agent 任务（不应出现），active=%s",
+      activeAgentJobs,
+    );
+  }
+
+  try {
   const bin = agentBin();
   const prompt = buildPrompt(chatId, userText);
   const args = buildSpawnArgs(prompt);
@@ -140,6 +167,12 @@ async function runCursorAgentJob(job) {
   const verboseFeishu = streamProgressToFeishu();
   let lastSend = 0;
   let accAssistant = "";
+  let sawLarkCliSend = false;
+  let agentExitedOk = false;
+
+  console.log(
+    `[cursor-agent] job start message_id=${messageId || "—"} len=${String(userText).length}`,
+  );
 
   /** 飞书 API 串行，避免并发 create 乱序 */
   let feishuQ = Promise.resolve();
@@ -164,11 +197,12 @@ async function runCursorAgentJob(job) {
     );
   } else {
     console.log(
-      "[cursor-agent] 安静模式：成功时由 Agent 通过 lark-cli 单条回复；桥接仅在失败时发飞书。可设 CURSOR_AGENT_STREAM_TO_FEISHU=1 恢复过程推送。",
+      "[cursor-agent] 安静模式：优先 lark-cli；未检测到发信时桥接可补发（CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0 可关）。",
     );
   }
 
   try {
+    const timeoutMs = parseInt(process.env.CURSOR_AGENT_TIMEOUT_MS || "0", 10) || 0;
     await new Promise((resolve, reject) => {
       console.log(`[cursor-agent] spawn ${bin} cwd=${cwd}`);
       const child = spawn(bin, args, {
@@ -178,6 +212,24 @@ async function runCursorAgentJob(job) {
       });
 
       let stderrBuf = "";
+      let killTimer = null;
+      if (timeoutMs > 0) {
+        killTimer = setTimeout(() => {
+          console.error(`[cursor-agent] 超时 ${timeoutMs}ms，终止 agent`);
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            /* ignore */
+          }
+          setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              /* ignore */
+            }
+          }, 8000);
+        }, timeoutMs);
+      }
 
       child.stderr?.on("data", (ch) => {
         stderrBuf += ch.toString();
@@ -199,6 +251,10 @@ async function runCursorAgentJob(job) {
         const t = obj.type;
         const st = obj.subtype;
 
+        if (t === "tool_call" && toolCallMentionsLarkCli(obj)) {
+          sawLarkCliSend = true;
+        }
+
         if (verboseFeishu && t === "tool_call" && st === "started") {
           const b =
             toolBrief(obj) ||
@@ -206,10 +262,10 @@ async function runCursorAgentJob(job) {
           void sendThrottled(`🔧 ${b}`, true);
         }
 
-        if (verboseFeishu && t === "assistant") {
+        if (t === "assistant") {
           const d = extractAssistantDelta(obj);
           if (d) accAssistant += d;
-          if (accAssistant.length >= 800) {
+          if (verboseFeishu && accAssistant.length >= 800) {
             const tail = accAssistant.slice(-600);
             void sendThrottled(`📝 …${tail}`, false);
             accAssistant = "";
@@ -226,17 +282,27 @@ async function runCursorAgentJob(job) {
       });
 
       child.on("error", (err) => {
+        if (killTimer) clearTimeout(killTimer);
         reject(err);
       });
 
       child.on("close", (code) => {
-        if (code === 0) resolve();
-        else
+        if (killTimer) clearTimeout(killTimer);
+        try {
+          rl.close();
+        } catch {
+          /* ignore */
+        }
+        if (code === 0) {
+          agentExitedOk = true;
+          resolve();
+        } else {
           reject(
             new Error(
               `agent 退出码 ${code}${stderrBuf ? `: ${stderrBuf.slice(-500)}` : ""}`,
             ),
           );
+        }
       });
     });
   } catch (e) {
@@ -246,8 +312,37 @@ async function runCursorAgentJob(job) {
     );
   }
 
+  if (
+    agentExitedOk &&
+    !verboseFeishu &&
+    quietBridgeFallback() &&
+    !sawLarkCliSend
+  ) {
+    const body = accAssistant.trim();
+    const inferredLarkOk =
+      /lark-cli/i.test(body) &&
+      /(message_id|ok\s*:\s*true|messages-send)/i.test(body);
+    if (inferredLarkOk) {
+      console.log(
+        "[cursor-agent] 从模型输出推断已走 lark-cli，跳过桥接补发（避免重复）",
+      );
+    } else if (body.length > 20) {
+      console.warn(
+        "[cursor-agent] 未在流式 JSON 中识别 lark-cli 工具调用，由桥接补发答复",
+      );
+      await safeSend(body.slice(-FEISHU_CHUNK_MAX));
+    } else {
+      await safeSend(
+        "Agent 已结束，但未检测到执行 lark-cli 发信，且没有可用正文可转发。请再发一次，或检查本机 lark-cli / 网络。",
+      );
+    }
+  }
+
   if (verboseFeishu && accAssistant.trim()) {
     await safeSend(`📄 末尾输出摘要：\n${accAssistant.slice(-FEISHU_CHUNK_MAX)}`);
+  }
+  } finally {
+    activeAgentJobs--;
   }
 }
 

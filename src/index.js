@@ -55,6 +55,30 @@ function parseAllowlist() {
 
 const allowlist = parseAllowlist();
 
+/** 飞书可能用不同 event_id 重复投递同一条消息；在 await 前去重，避免并发入队 */
+const claimedDeliveryKeys = new Set();
+const claimedDeliveryOrder = [];
+const CLAIM_DELIVERY_CAP = 4000;
+
+function tryClaimDelivery(messageId, eventId) {
+  const keys = [];
+  if (messageId) keys.push(`m:${messageId}`);
+  if (eventId) keys.push(`e:${eventId}`);
+  if (keys.length === 0) return true;
+  for (const k of keys) {
+    if (claimedDeliveryKeys.has(k)) return false;
+  }
+  for (const k of keys) {
+    claimedDeliveryKeys.add(k);
+    claimedDeliveryOrder.push(k);
+  }
+  while (claimedDeliveryOrder.length > CLAIM_DELIVERY_CAP) {
+    const old = claimedDeliveryOrder.shift();
+    claimedDeliveryKeys.delete(old);
+  }
+  return true;
+}
+
 function buildLarkClient() {
   if (!appId || !appSecret) return null;
   return new lark.Client({
@@ -79,6 +103,13 @@ function createImMessageHandler(client) {
     }
 
     const msg = data.message || {};
+    const mid = msg.message_id || "";
+    const eid = data.event_id || "";
+    if (!tryClaimDelivery(mid, eid)) {
+      console.log("[bridge] duplicate delivery skipped (sync):", mid || eid);
+      return {};
+    }
+
     const userText = parseUserText(msg.message_type, msg.content || "");
     const payload = {
       event_id: data.event_id || "",
@@ -100,6 +131,7 @@ function createImMessageHandler(client) {
           client,
           chatId: payload.chat_id,
           userText,
+          messageId: payload.message_id || "",
         });
       } else {
         enqueueAutoReply({

@@ -17,8 +17,13 @@ function parseUserText(messageType, contentStr) {
   if (!contentStr) return "";
   try {
     const j = JSON.parse(contentStr);
-    if (messageType === "text" && j.text) return String(j.text).trim();
-    if (j.text) return String(j.text).trim();
+    let t = "";
+    if (messageType === "text" && j.text) t = String(j.text);
+    else if (j.text) t = String(j.text);
+    else return contentStr;
+    // 群聊 @ 机器人时常见 <at ...></at>，去掉以免只剩空白被当成无文本
+    t = t.replace(/<at[^>]*>[^<]*<\/at>/gi, " ").replace(/\s+/g, " ").trim();
+    return t;
   } catch {
     /* ignore */
   }

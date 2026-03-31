@@ -70,7 +70,9 @@ CURSOR_AGENT_SANDBOX=disabled
 # CURSOR_AGENT_FEISHU_MIN_INTERVAL_MS=5000
 ```
 
-5. `npm start`，飞书发消息 → **默认「安静模式」**：桥接不把工具/流式正文刷到飞书，只由 Agent 执行 **lark-cli** 发 **一条简洁答复**（失败时桥接会发错误说明）。若要看 🔧📝 过程，设 `CURSOR_AGENT_STREAM_TO_FEISHU=1`。连续多条消息会**顺序执行**，前一条 Agent 未结束时下一条会在队列里等待（已修复此前「第二条永远不跑」的问题）。
+5. `npm start`，飞书发消息 → **默认「安静模式」**：桥接不把工具/流式正文刷到飞书，由 Agent 执行 **lark-cli** 发简洁答复。若流式输出里**未识别到** `lark-cli` 调用，桥接会用 **API 补发**模型正文，减少「只有自动回复、没有答案」的概率（`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0` 可关）。若要看 🔧📝 过程，设 `CURSOR_AGENT_STREAM_TO_FEISHU=1`。连续多条消息**顺序执行**；可选 `CURSOR_AGENT_TIMEOUT_MS` 防止单条卡死占满队列。
+
+说明：若飞书里固定出现「已收到，正在本机 Cursor 中处理，请稍候」等句，**本仓库代码不会发该文案**，请到飞书开发者后台或其它自动化里排查机器人自动回复。
 
 官方文档：[Headless CLI](https://cursor.com/docs/cli/headless)、[Parameters](https://cursor.com/docs/cli/reference/parameters)。
 
