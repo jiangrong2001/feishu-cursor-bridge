@@ -295,6 +295,7 @@ lark-cli im +messages-send --as bot --chat-id "oc_your_chat_id" --text "manual t
 | Path | Role |
 |------|------|
 | `docs/images/` | Documentation images (Feishu screenshots) |
+| `docs/promo/` | Optional: Xiaohongshu promo copy + `opencli` publish examples (not required to run the bridge) |
 | `inbox/LATEST.md` / `LATEST.json` | Latest Feishu command log |
 | `inbox/cmd-*.json` | Per-message raw payloads |
 | `inbox/debug/` | When `BRIDGE_DEBUG_LOG=1`: `bridge.log` and per-job `agent-*.log` |
