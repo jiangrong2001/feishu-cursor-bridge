@@ -1,23 +1,15 @@
 ---
-description: 处理从手机飞书经桥接服务写入的命令队列（lark-cli 回复）
+description: 飞书桥接写入的 inbox 日志与排错（本项目仅 Cursor Agent 全自动）
 globs: inbox/LATEST.md,inbox/LATEST.json
 ---
 
 # 飞书 → Cursor 桥接
 
-- **CURSOR_AGENT_AUTO=1**：桥接会 `spawn` **Cursor Agent CLI**（`agent -p`，stream-json），并把工具/进度摘要推回飞书；你帮用户装 CLI、配 `CURSOR_API_KEY` / `agent login`、调 `CURSOR_AGENT_WORKSPACE`、排 `agent` 不在 PATH 等。
-- **AUTO_REPLY_ENABLED=1**（与上一项互斥）：直连 OpenAI/Anthropic，无 Agent 工具链。
-- 两者都关：用户须在 Cursor **主动对话**处理 `inbox`。
+- 运行 `npm start` 且 `.env` 中 **`CURSOR_AGENT_AUTO=1`** 时，桥接会 **spawn Cursor Agent CLI**，无需在 IDE 里手动「处理队列」。
+- `inbox/LATEST.md` / `LATEST.json` 是**日志**：便于对照 `chat_id`、用户原文；若全自动异常，可据此用 `lark-cli` 手动发一条验证权限。
 
-当用户打开或提到 `inbox/LATEST.md` / `LATEST.json` 时（通常为半自动或查日志）：
+手动发飞书（示例）：
 
-1. 阅读其中「用户发来的内容」与 `chat_id`。
-2. 在仓库或终端中完成用户请求（分析、查文档、写代码等）；需要飞书数据时用 `lark-cli`，并遵循已安装的 `lark-*` skills 与安全规则（`lark-shared`）。
-3. 若用户需要在**手机飞书**看到结果：用 `LATEST.json` 中的 `chat_id`，在终端执行发消息（示例，机器人身份）：
+`lark-cli im +messages-send --as bot --chat-id "<chat_id>" --text "<正文>"`
 
-   `lark-cli im +messages-send --as bot --chat-id "<chat_id>" --text "<回复正文>"`
-
-   若需用户身份或群权限，按 `lark-im` / `lark-shared` 调整 `--as` 与 scope。
-4. 不要向用户或日志泄露 appSecret、token；回复前确认用户意图（写操作）。
-
-桥接服务说明见仓库根目录 `README.zh.md`。
+勿泄露 appSecret、token。说明见根目录 `README.zh.md`。

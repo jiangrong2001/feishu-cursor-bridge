@@ -1,7 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { spawn } = require("child_process");
-const { envTruthy } = require("./envFlags");
 
 function inboxDir() {
   return process.env.INBOX_DIR || path.join(__dirname, "..", "inbox");
@@ -21,7 +20,6 @@ function parseUserText(messageType, contentStr) {
     if (messageType === "text" && j.text) t = String(j.text);
     else if (j.text) t = String(j.text);
     else return contentStr;
-    // 群聊 @ 机器人时常见 <at ...></at>，去掉以免只剩空白被当成无文本
     t = t.replace(/<at[^>]*>[^<]*<\/at>/gi, " ").replace(/\s+/g, " ").trim();
     return t;
   } catch {
@@ -88,9 +86,8 @@ function openInCursor(filePath) {
 
 /**
  * @param {object} payload
- * @param {import('@larksuiteoapi/node-sdk').Client | null} client
  */
-async function writeIncoming(payload, client) {
+async function writeIncoming(payload) {
   const dir = await ensureInbox();
   const eventId =
     payload.event_id || payload.message_id || `noid-${Date.now()}`;
@@ -118,7 +115,7 @@ async function writeIncoming(payload, client) {
 
   const md = `# 飞书 → Cursor 命令队列
 
-> **说明**：本文件由桥接**自动写入**作日志。若 \`CURSOR_AGENT_AUTO=1\`，会触发本机 **Cursor Agent CLI**（headless）并把过程摘要推回飞书；若仅 \`AUTO_REPLY_ENABLED=1\` 则走直连大模型 API；都未开启时须手动在 Cursor 里处理并用 \`lark-cli\` 回飞书。
+> **说明**：本文件由桥接**自动写入**。本仓库仅支持 **Cursor Agent CLI 全自动**（\`CURSOR_AGENT_AUTO=1\`）：收到消息后会触发本机 \`agent\` 子进程，并由 \`lark-cli\` / 桥接 API 将答复发回飞书。
 
 - 收到时间: ${latestJson.received_at}
 - event_id: \`${eventId || "(无)"}\`
@@ -131,18 +128,11 @@ async function writeIncoming(payload, client) {
 
 ${userText || "_(无法解析为文本，请查看同目录下对应的 cmd-*.json 中的 raw_content)_"}
 
-## 请你（Cursor Agent）处理说明
-
-1. 根据上文完成用户请求的分析或操作。
-2. 需要把结果发回手机飞书时，在终端使用 \`lark-cli\`（机器人身份示例）：
+## 通过 lark-cli 回复飞书（供手动排错时参考）
 
 \`\`\`bash
 lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" --text "在这里写回复内容"
 \`\`\`
-
-若需用户身份或群权限，请查阅已安装的 \`lark-im\` / \`lark-shared\` skill，并确认 \`lark-cli auth status\` 与 scope。
-
-3. 处理完成后可删除本文件或保留作记录。
 `;
 
   await fs.writeFile(path.join(dir, "LATEST.md"), md, "utf8");
@@ -151,30 +141,6 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
   await appendSeen(dir, eventId);
 
   openInCursor(path.join(dir, "LATEST.md"));
-
-  if (
-    client &&
-    process.env.LARK_AUTO_ACK === "1" &&
-    !envTruthy("AUTO_REPLY_ENABLED") &&
-    !envTruthy("CURSOR_AGENT_AUTO") &&
-    payload.chat_id &&
-    userText
-  ) {
-    try {
-      await client.im.message.create({
-        params: { receive_id_type: "chat_id" },
-        data: {
-          receive_id: payload.chat_id,
-          msg_type: "text",
-          content: JSON.stringify({
-            text: "已记入本机 inbox/LATEST.md。当前为半自动：桥接未开启 Cursor Agent 全自动。若要飞书一发即由本机 agent 执行并回传过程，请在 .env 设置 CURSOR_AGENT_AUTO=1（或 true），安装好 agent CLI 并登录，然后重启 npm start。若继续用手动方式：在本机 Cursor（本仓库）对 AI 说「处理飞书队列」，由 AI 执行 lark-cli 发回飞书。",
-          }),
-        },
-      });
-    } catch (e) {
-      console.error("[bridge] auto-ack failed:", e.message);
-    }
-  }
 
   return { duplicate: false };
 }
