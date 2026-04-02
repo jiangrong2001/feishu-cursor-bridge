@@ -7,6 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { envTruthy } = require("./envFlags");
+const { createStreamJsonChatWriter } = require("./agentStreamJsonChat");
 
 function inboxDir() {
   return process.env.INBOX_DIR || path.join(__dirname, "..", "inbox");
@@ -68,29 +69,55 @@ function sanitizeMessageId(id) {
  *   chatId?: string;
  *   userText?: string;
  *   senderOpenId?: string;
+ *   onChatBlock?: (piece: string) => void;
  * }} ctx
  * @returns {null | {
- *   filePath: string;
+ *   filePath?: string | null;
  *   logJob: (event: string, detail?: string) => void;
  *   logFullPrompt: (prompt: string) => void;
  *   logSpawn: (bin: string, cwd: string, args: string[]) => void;
  *   logStdoutLine: (line: string) => void;
  *   logStderrChunk: (chunk: string) => void;
  *   logJobSummary: (o: object) => void;
+ *   chatFilePath?: string | null;
+ *   finishChatTranscript: () => void;
  * }}
  */
 function createAgentDebugSession(ctx) {
-  if (!isDebugLogEnabled()) return null;
-  let filePath;
+  const fileLog = isDebugLogEnabled();
+  const onChatBlock = typeof ctx.onChatBlock === "function" ? ctx.onChatBlock : null;
+  if (!fileLog && !onChatBlock) return null;
+
+  let filePath = null;
+  let chatFilePath = null;
+  /** @type {{ pushJson: (o: object) => void; end: () => void } | null} */
+  let chatWriter = null;
   try {
-    const dir = ensureDebugDir();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const mid = sanitizeMessageId(ctx.messageId);
-    filePath = path.join(dir, `agent-${stamp}-${mid}.log`);
-    const header =
-      `[${nowIso()}] SESSION_START message_id=${ctx.messageId || ""} chat_id=${ctx.chatId || ""} sender_open_id=${ctx.senderOpenId || ""}\n` +
-      `[${nowIso()}] USER_TEXT (完整用户命令)\n${ctx.userText ?? ""}\n\n`;
-    fs.writeFileSync(filePath, header, "utf8");
+    if (fileLog) {
+      const dir = ensureDebugDir();
+      filePath = path.join(dir, `agent-${stamp}-${mid}.log`);
+      chatFilePath = path.join(dir, `agent-${stamp}-${mid}.chat.txt`);
+      const header =
+        `[${nowIso()}] SESSION_START message_id=${ctx.messageId || ""} chat_id=${ctx.chatId || ""} sender_open_id=${ctx.senderOpenId || ""}\n` +
+        `[${nowIso()}] USER_TEXT (完整用户命令)\n${ctx.userText ?? ""}\n\n`;
+      fs.writeFileSync(filePath, header, "utf8");
+      const chatHeader =
+        `# Cursor Agent 对话摘录（由 stream-json 整理，易读版）\n` +
+        `# 原始全量调试日志（含 STDOUT_RAW / JSON）：${path.basename(filePath)}\n` +
+        `# message_id=${ctx.messageId || ""} chat_id=${ctx.chatId || ""}\n` +
+        `# 生成时间 ${nowIso()}\n\n`;
+      fs.writeFileSync(chatFilePath, chatHeader, "utf8");
+    }
+    const appendChat = (chunk) => {
+      if (chatFilePath) appendFile(chatFilePath, chunk);
+    };
+    chatWriter = createStreamJsonChatWriter(appendChat, {
+      userText: ctx.userText,
+      agentLogBasename: filePath ? path.basename(filePath) : "（未启用 BRIDGE_DEBUG_LOG）",
+      onBlock: onChatBlock,
+    });
   } catch (e) {
     console.error("[bridge-debug] 创建会话日志失败:", e.message);
     return null;
@@ -98,16 +125,20 @@ function createAgentDebugSession(ctx) {
 
   return {
     filePath,
+    chatFilePath,
     logJob(event, detail = "") {
+      if (!filePath) return;
       appendFile(filePath, `[${nowIso()}] [job] ${event}${detail ? ` ${detail}` : ""}\n`);
     },
     logFullPrompt(prompt) {
+      if (!filePath) return;
       appendFile(
         filePath,
         `\n========== 下发给 Agent 的完整 prompt (${String(prompt).length} 字符) ==========\n${prompt}\n========== END PROMPT ==========\n\n`,
       );
     },
     logSpawn(bin, cwd, args) {
+      if (!filePath) return;
       appendFile(
         filePath,
         `[${nowIso()}] SPAW bin=${JSON.stringify(bin)} cwd=${JSON.stringify(cwd)}\n` +
@@ -115,25 +146,42 @@ function createAgentDebugSession(ctx) {
       );
     },
     logStdoutLine(line) {
-      appendFile(filePath, `[${nowIso()}] STDOUT_RAW ${line}\n`);
+      if (filePath) {
+        appendFile(filePath, `[${nowIso()}] STDOUT_RAW ${line}\n`);
+      }
       const t = line.trim();
       if (!t.startsWith("{")) return;
       try {
         const obj = JSON.parse(t);
-        appendFile(
-          filePath,
-          `[${nowIso()}] STDOUT_JSON_PRETTY type=${obj.type ?? "?"} subtype=${obj.subtype ?? ""}\n${JSON.stringify(obj, null, 2)}\n\n`,
-        );
+        if (filePath) {
+          appendFile(
+            filePath,
+            `[${nowIso()}] STDOUT_JSON_PRETTY type=${obj.type ?? "?"} subtype=${obj.subtype ?? ""}\n${JSON.stringify(obj, null, 2)}\n\n`,
+          );
+        }
+        chatWriter?.pushJson(obj);
       } catch {
-        appendFile(filePath, `[${nowIso()}] STDOUT_JSON_PARSE_FAIL (仍保留上方 RAW)\n`);
+        if (filePath) {
+          appendFile(filePath, `[${nowIso()}] STDOUT_JSON_PARSE_FAIL (仍保留上方 RAW)\n`);
+        }
       }
     },
     logStderrChunk(chunk) {
+      if (!filePath) return;
       const s = String(chunk);
       appendFile(filePath, `[${nowIso()}] STDERR ${JSON.stringify(s)}\n`);
     },
     logJobSummary(o) {
+      if (!filePath) return;
       appendFile(filePath, `[${nowIso()}] JOB_SUMMARY\n${JSON.stringify(o, null, 2)}\n`);
+    },
+    finishChatTranscript() {
+      try {
+        chatWriter?.end();
+      } catch (e) {
+        console.error("[bridge-debug] 对话摘录收尾失败:", e.message);
+      }
+      chatWriter = null;
     },
   };
 }

@@ -16,16 +16,103 @@ const { getFeishuTextMaxChars } = require("./feishuMessageLimits");
 const readline = require("readline");
 const path = require("path");
 
-/** @type {Array<{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string; messageId?: string; senderOpenId?: string }>} */
+/** @type {Array<{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string; messageId?: string; senderOpenId?: string; streamTranscriptToFeishu?: boolean }>} */
 const q = [];
 let draining = false;
 let activeAgentJobs = 0;
+
+/** 记录每个会话最近一次有效任务（去前缀后正文 + 是否开启飞书对话摘录流） */
+const lastEffectiveUserTextByChat = new Map();
 
 /** 未显式关闭时默认开启：安静模式下若未检测到 lark-cli 发信，则由桥接补发（避免飞书空白） */
 function quietBridgeFallback() {
   const raw = process.env.CURSOR_AGENT_QUIET_BRIDGE_FALLBACK;
   if (raw === undefined || raw === "") return true;
   return envTruthy("CURSOR_AGENT_QUIET_BRIDGE_FALLBACK");
+}
+
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function normalizeUserCmd(s) {
+  return String(s || "").trim().replace(/\s+/g, " ");
+}
+
+function isRetryCommandText(userText) {
+  const t = normalizeUserCmd(userText).toLowerCase();
+  if (!t) return false;
+  // 覆盖常见中文口语；也兼容英文 retry
+  return (
+    t === "重试" ||
+    t === "再试" ||
+    t === "再试一次" ||
+    t === "再来一次" ||
+    t === "多试几次" ||
+    t === "retry" ||
+    t === "try again"
+  );
+}
+
+/**
+ * 消息以 /v、/verbos（常见拼写）、/verbose 开头时：去掉前缀，并开启「对话摘录」实时推飞书（格式同 agent-*.chat.txt）。
+ */
+function parseTranscriptVerbosePrefix(raw) {
+  const s = String(raw || "");
+  const lead = s.trimStart();
+  const re = /^\/(?:v|verbos|verbose)(?:\s+|\s*$)/i;
+  const m = lead.match(re);
+  if (!m) return { stripped: s.trim(), streamTranscript: false };
+  const rest = lead.slice(m[0].length).trim();
+  return { stripped: rest, streamTranscript: true };
+}
+
+/** 将长文本按飞书单条上限切分，尽量在换行处断开 */
+function splitTranscriptForFeishu(text, maxChars) {
+  const s = String(text);
+  if (s.length <= maxChars) return [s];
+  const parts = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(i + maxChars, s.length);
+    if (end < s.length) {
+      const nl = s.lastIndexOf("\n", end);
+      if (nl > i + maxChars * 0.55) end = nl + 1;
+    }
+    parts.push(s.slice(i, end));
+    i = end;
+  }
+  for (let k = 1; k < parts.length; k++) {
+    parts[k] = `（续 ${k + 1}/${parts.length}）\n${parts[k]}`;
+  }
+  return parts;
+}
+
+function transcriptStreamMinIntervalMs() {
+  const n = parseInt(process.env.CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS || "350", 10);
+  if (!Number.isFinite(n)) return 350;
+  return Math.max(0, Math.min(30_000, n));
+}
+
+function getAgentRetryMax() {
+  // 默认 2 次重试（总共最多 3 轮），避免飞书里一句话触发长时间占用
+  const raw = parseInt(process.env.CURSOR_AGENT_RETRY_MAX || "2", 10);
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(0, Math.min(10, raw));
+}
+
+function getAgentRetryBaseDelayMs() {
+  const raw = parseInt(process.env.CURSOR_AGENT_RETRY_BASE_DELAY_MS || "1200", 10);
+  if (!Number.isFinite(raw)) return 1200;
+  return Math.max(200, Math.min(60_000, raw));
+}
+
+function computeRetryDelayMs(attemptIdx) {
+  const base = getAgentRetryBaseDelayMs();
+  // 指数退避 + 少量抖动，attemptIdx 从 1 开始（第 1 次重试）
+  const exp = Math.min(6, attemptIdx);
+  const jitter = Math.floor(Math.random() * 250);
+  return Math.min(60_000, base * Math.pow(2, exp - 1) + jitter);
 }
 
 function terminalCommandFromToolCall(tc) {
@@ -179,6 +266,7 @@ function buildPrompt(chatId, userText) {
     `- 工作区（--workspace）：${ws}`,
     `- 飞书单条文本消息受开放平台限制（请求体约 150KB）；本桥接 API 补发截断为 ${feishuTextMax} 字符（.env：BRIDGE_FEISHU_TEXT_MAX_CHARS）。你用 lark-cli 发送时亦勿超过飞书限制，过长应拆多条或发文件。`,
     "- 你可使用 Agent 全部能力：读文件、改代码、在终端执行命令（本场景已声明为高权限自动化）。",
+    "- 若需克隆 Git 仓库：默认使用**完整克隆**（`git clone <url>`，勿用 `--depth` 浅克隆），以便拉取完整历史与内容；若工作区已是浅克隆且需要完整历史，可 `git fetch --unshallow` 或删目录后重新完整克隆。",
     "- inbox/ 下有本次任务的 LATEST.md、LATEST.json（含用户本条原文，以 LATEST.json 的 user_text 为准）。",
     "",
     "【图片与文件（默认附件，禁止用纯文本糊弄）】",
@@ -227,7 +315,14 @@ function buildSpawnArgs(prompt) {
 }
 
 async function runCursorAgentJob(job) {
-  const { client, chatId, userText, messageId, senderOpenId } = job;
+  const {
+    client,
+    chatId,
+    userText,
+    messageId,
+    senderOpenId,
+    streamTranscriptToFeishu = false,
+  } = job;
   activeAgentJobs++;
   if (activeAgentJobs > 1) {
     console.error(
@@ -236,20 +331,71 @@ async function runCursorAgentJob(job) {
     );
   }
 
+  let debug = null;
   try {
   console.log(
     `[cursor-agent] job start message_id=${messageId || "—"} len=${String(userText).length}`,
   );
 
-  const debug = createAgentDebugSession({
+  let lastTranscriptSend = 0;
+  const feishuTextCap = getFeishuTextMaxChars();
+  /** 飞书 API 串行；须早于 createAgentDebugSession，供 onChatBlock 入队 */
+  let feishuQ = Promise.resolve();
+  if (streamTranscriptToFeishu) {
+    feishuQ = feishuQ.then(async () => {
+      try {
+        await sendText(
+          client,
+          chatId,
+          "📜 对话摘录实时推送中（格式与 agent-*.chat.txt 相同，按段到达）…",
+        );
+      } catch (e) {
+        console.error("[cursor-agent] 摘录开场提示发送失败:", e.message);
+      }
+      lastTranscriptSend = Date.now();
+    });
+  }
+
+  debug = createAgentDebugSession({
     messageId,
     chatId,
     userText,
     senderOpenId,
+    onChatBlock: streamTranscriptToFeishu
+      ? (piece) => {
+          const parts = splitTranscriptForFeishu(piece, feishuTextCap);
+          for (const part of parts) {
+            feishuQ = feishuQ.then(async () => {
+              const gap = transcriptStreamMinIntervalMs();
+              if (gap > 0) {
+                const wait = Math.max(0, gap - (Date.now() - lastTranscriptSend));
+                if (wait > 0) await sleepMs(wait);
+              }
+              try {
+                await sendText(client, chatId, part);
+              } catch (e) {
+                console.error("[cursor-agent] 对话摘录推飞书失败:", e.message);
+              }
+              lastTranscriptSend = Date.now();
+            });
+          }
+        }
+      : undefined,
   });
   if (debug) {
-    console.log("[cursor-agent] 调试日志:", debug.filePath);
-    debug.logJob("job_start", `verboseFeishu=${streamProgressToFeishu()}`);
+    if (debug.filePath) {
+      console.log("[cursor-agent] 调试日志:", debug.filePath);
+    }
+    if (debug.chatFilePath) {
+      console.log("[cursor-agent] 对话摘录文件:", debug.chatFilePath);
+    }
+    if (streamTranscriptToFeishu) {
+      console.log("[cursor-agent] 飞书实时对话摘录: 已开启（/v、/verbos、/verbose）");
+    }
+    debug.logJob(
+      "job_start",
+      `verboseFeishu=${streamProgressToFeishu()} streamTranscript=${streamTranscriptToFeishu}`,
+    );
   }
 
   const bin = agentBin();
@@ -259,6 +405,7 @@ async function runCursorAgentJob(job) {
   debug?.logFullPrompt(prompt);
   const minGap = minIntervalMs();
   const verboseFeishu = streamProgressToFeishu();
+  const effectiveVerboseFeishu = verboseFeishu && !streamTranscriptToFeishu;
   let lastSend = 0;
   let accAssistant = "";
   /** lark-cli im +messages-send 在流里 **completed 且 success**（非 failure） */
@@ -267,8 +414,6 @@ async function runCursorAgentJob(job) {
   /** 经桥接 API 成功送达飞书（lark-cli 发信不计入；用于兜底空白） */
   let bridgeFeishuDelivered = false;
 
-  /** 飞书 API 串行，避免并发 create 乱序 */
-  let feishuQ = Promise.resolve();
   const safeSend = (text) => {
     feishuQ = feishuQ.then(async () => {
       try {
@@ -282,14 +427,14 @@ async function runCursorAgentJob(job) {
   };
 
   const sendThrottled = (msg, urgent) => {
-    if (!verboseFeishu) return feishuQ;
+    if (!effectiveVerboseFeishu) return feishuQ;
     const now = Date.now();
     if (!urgent && now - lastSend < minGap) return feishuQ;
     lastSend = now;
     return safeSend(msg);
   };
 
-  if (verboseFeishu) {
+  if (effectiveVerboseFeishu) {
     await safeSend(
       "🤖 本机处理中，下方为进度摘要；结论一般由 lark-cli 发到本会话。",
     );
@@ -299,7 +444,7 @@ async function runCursorAgentJob(job) {
     );
   }
 
-  try {
+  const spawnOnce = async () => {
     const timeoutMs = getAgentTimeoutMs();
     await new Promise((resolve, reject) => {
       console.log(`[cursor-agent] spawn ${bin} cwd=${cwd}`);
@@ -358,7 +503,7 @@ async function runCursorAgentJob(job) {
           larkCliFeishuOk = true;
         }
 
-        if (verboseFeishu && t === "tool_call" && st === "started") {
+        if (effectiveVerboseFeishu && t === "tool_call" && st === "started") {
           const b =
             toolBrief(obj) ||
             `调用 ${Object.keys(obj.tool_call || {}).join(", ") || "未知工具"}`;
@@ -368,14 +513,14 @@ async function runCursorAgentJob(job) {
         if (t === "assistant") {
           const d = extractAssistantDelta(obj);
           if (d) accAssistant += d;
-          if (verboseFeishu && accAssistant.length >= 800) {
+          if (effectiveVerboseFeishu && accAssistant.length >= 800) {
             const tail = accAssistant.slice(-600);
             void sendThrottled(`📝 …${tail}`, false);
             accAssistant = "";
           }
         }
 
-        if (verboseFeishu && t === "result") {
+        if (effectiveVerboseFeishu && t === "result") {
           const ms = obj.duration_ms;
           void sendThrottled(
             `✅ 本轮结束${ms != null ? `（约 ${ms}ms）` : ""}。`,
@@ -410,12 +555,37 @@ async function runCursorAgentJob(job) {
         }
       });
     });
-  } catch (e) {
-    console.error("[cursor-agent] failed:", e.message);
-    debug?.logJob("agent_error", e.message);
-    await safeSend(
-      `Agent 执行失败：${e.message}\n请在本机终端执行 agent login，并确认已安装 CLI（见 cursor.com/docs/cli）。`,
-    );
+  };
+
+  let lastAgentError = null;
+  const maxRetry = getAgentRetryMax();
+  for (let attempt = 0; attempt <= maxRetry; attempt++) {
+    try {
+      if (attempt > 0) {
+        const d = computeRetryDelayMs(attempt);
+        console.warn(
+          `[cursor-agent] 将重试第 ${attempt}/${maxRetry} 次，等待 ${d}ms（上次错误：${lastAgentError?.message || "unknown"}）`,
+        );
+        debug?.logJob(
+          "agent_retry_wait",
+          `attempt=${attempt} wait_ms=${d} last=${lastAgentError?.message || ""}`,
+        );
+        await sleepMs(d);
+      }
+      await spawnOnce();
+      lastAgentError = null;
+      break;
+    } catch (e) {
+      lastAgentError = e;
+      agentExitedOk = false;
+      debug?.logJob("agent_error", e.message);
+      if (attempt >= maxRetry) {
+        console.error("[cursor-agent] failed:", e.message);
+        await safeSend(
+          `Agent 执行失败：${e.message}\n请在本机终端执行 agent login，并确认已安装 CLI（见 cursor.com/docs/cli）。`,
+        );
+      }
+    }
   }
 
   const feishuReplyDelivered = () =>
@@ -446,7 +616,7 @@ async function runCursorAgentJob(job) {
     }
   }
 
-  if (verboseFeishu && accAssistant.trim() && !larkCliFeishuOk) {
+  if (effectiveVerboseFeishu && accAssistant.trim() && !larkCliFeishuOk) {
     const tail = accAssistant.slice(-getFeishuTextMaxChars());
     if (isLikelyEchoOfUserBody(accAssistant, userText)) {
       console.warn(
@@ -481,8 +651,10 @@ async function runCursorAgentJob(job) {
       quietBridgeFallback() &&
       !feishuReplyDelivered(),
     verboseFeishu,
+    streamTranscriptToFeishu,
   });
   } finally {
+    debug?.finishChatTranscript?.();
     activeAgentJobs--;
   }
 }
@@ -533,6 +705,32 @@ function enqueueCursorAgent(p) {
     );
     return;
   }
+
+  const rawText = String(p.userText);
+  const isRetry = isRetryCommandText(rawText);
+  if (isRetry) {
+    const prev = lastEffectiveUserTextByChat.get(p.chatId);
+    if (prev && typeof prev === "object" && String(prev.text || "").trim()) {
+      console.log("[cursor-agent] 收到重试指令，复用上一条有效任务文本");
+      p.userText = String(prev.text);
+      p.streamTranscriptToFeishu = !!prev.streamTranscript;
+    } else if (prev && String(prev).trim()) {
+      console.log("[cursor-agent] 收到重试指令，复用上一条有效任务文本");
+      p.userText = String(prev);
+      p.streamTranscriptToFeishu = false;
+    } else {
+      console.log("[cursor-agent] 收到重试指令，但未找到可复用的上一条任务");
+    }
+  } else {
+    const { stripped, streamTranscript } = parseTranscriptVerbosePrefix(rawText);
+    p.userText = stripped;
+    p.streamTranscriptToFeishu = streamTranscript;
+    lastEffectiveUserTextByChat.set(p.chatId, {
+      text: stripped,
+      streamTranscript,
+    });
+  }
+
   const maxQ = getAgentMaxQueue();
   if (maxQ > 0 && q.length >= maxQ) {
     console.warn(`[cursor-agent] 队列已满 (${maxQ})，拒绝入队`);
