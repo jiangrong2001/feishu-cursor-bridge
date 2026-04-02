@@ -94,7 +94,8 @@ Notes:
 
 - **`CURSOR_AGENT_WORKSPACE`:** If unset, defaults to this repo root; set an **absolute path** to the project you want the agent to edit.  
 - **`CURSOR_AGENT_STREAM_TO_FEISHU=1`:** Streams tool/progress snippets to Feishu; default is off so chats usually show **one concise reply**.  
-- **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`:** Used only with the **“`/v` prefix”** feature below; minimum gap in milliseconds between consecutive transcript bubbles sent to Feishu, default **`350`**; set **`0`** to send as fast as the API queue allows.  
+- **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`:** Used only with the **`/v`-style prefix** (see **§3.5**); minimum gap in milliseconds between consecutive transcript bubbles sent to Feishu, default **`350`**; set **`0`** to send as fast as the API queue allows.  
+- **`BRIDGE_DISABLE_STARTUP_CONTROL_HELP=1`:** Disables the **cold-start** auto push of the control-command help to the **last active chat** (after **`/restart`**, help is still sent—see **§3.5**).  
 - **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`:** On by default; the bridge posts via **API only when Feishu delivery is not confirmed** (see **“How replies reach Feishu”** below). If `lark-cli` succeeds, the bridge **does not** duplicate. Set to `0` for **lark-cli only** (may occasionally leave Feishu silent).  
 - **`CURSOR_AGENT_TIMEOUT_MS`:** Max milliseconds per task, then the process is killed; `0` = no limit (e.g. use `600000` for 10 minutes). **Validated at startup** (integer, max ~24h).  
 - **`CURSOR_AGENT_MAX_QUEUE`:** Max queued agent jobs; default `30`, max `500`, `0` = unlimited (not for production). **Validated at startup**; when full, new messages are rejected with a short Feishu notice.  
@@ -113,13 +114,7 @@ Notes:
   - If still not confirmed, a short **nudge** message may be sent.  
 - **Streaming mode (`CURSOR_AGENT_STREAM_TO_FEISHU=1`)**  
   - If lark-cli is confirmed delivered, the final **long assistant tail** is **not** pushed to Feishu (reduces duplication).  
-- **Feishu text prefix: `/v`, `/verbos`, `/verbose` (live transcript to Feishu)**  
-  - If a **plain-text** message starts with one of these prefixes (**case-insensitive**), followed by **whitespace or a newline** and the real request (e.g. `/v summarize README`, `/verbose\nfix one line`), the bridge **strips the prefix** and passes the remainder to the agent. **Prefix-only** messages have no task body.  
-  - For that job, the bridge sends **multiple** Feishu text messages, one **block** at a time, in the **same layout** as **`inbox/debug/agent-*.chat.txt`** (e.g. system, user, thinking, assistant, tool start/complete, result footer). This is a readable “chat transcript” stream while the agent runs.  
-  - This mode is **mutually exclusive** with the **`CURSOR_AGENT_STREAM_TO_FEISHU=1`** 🔧/📝 style progress spam: when the prefix is used, that env-var style progress is **not** sent (avoids duplicate noise).  
-  - Long blocks are split across several Feishu messages using **`BRIDGE_FEISHU_TEXT_MAX_CHARS`**, with continuation markers such as **`（续 2/3）`** in the text.  
-  - **Retry** commands reuse the last **stripped** task text and whether **transcript mode** was on.  
-  - **`inbox` / `LATEST.*` / `cmd-*.json`** still store the **raw** Feishu payload (may include the prefix); the agent sees the stripped text only.  
+- **Feishu slash commands** (`/h`, `/v`, `/restart`, …): full reference, auto push on start/restart—see **§3.5 Feishu control commands**.  
 - **Images and files**  
   - Built into the agent system prompt (not a separate env var): when the user asks to send an **image/screenshot/file**, default to **lark-cli attachments** (e.g. `+messages-send --image`, per your CLI). Do **not** replace with plain text or links only, and do **not** ask the user which channel to use.
 
@@ -134,11 +129,48 @@ If the port is busy, change `PORT` in `.env` or free the port. If **only** `/hea
 
 ---
 
+## 3.5. Feishu control commands
+
+These are handled by the **bridge** (not enqueued to Cursor Agent). Send each as its **own** plain-text message (leading spaces OK, **case-insensitive**). Do **not** prefix normal tasks with them unless you intend the behavior.
+
+### Quick reference
+
+| Command | Effect |
+|---------|--------|
+| **`/h`** or **`/help`** | Bot replies with the **short control-command guide** (may be multiple bubbles). |
+| **`/v` / `/verbos` / `/verbose`** | After whitespace/newline, task text goes to the agent; Feishu receives a **live transcript** in the same block style as `agent-*.chat.txt`. |
+| **`/restart`** | Restarts the bridge Node process; optional **directory path** for a new agent workspace (see below). |
+| **“Retry” phrases** (no slash) | Reuse the last **stripped** task body (including whether `/v` was used). |
+
+### `/h`, `/help`
+
+- Matched only when the **entire** message is `/h` or `/help` (plus surrounding whitespace).
+
+### `/v`, `/verbos`, `/verbose`
+
+- Same rules as previously documented: mutually exclusive with **`CURSOR_AGENT_STREAM_TO_FEISHU`** style progress; **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**; chunking with **`（续 n/m）`**; **`inbox`** keeps the raw Feishu text.
+
+### `/restart`
+
+- **Whole-message** `/restart`; trailing text = directory path (absolute, repo-relative, `~/…`).  
+- Requires a **supervisor** (pm2, launchd, etc.) to bring the process back.  
+- **`.bridge-workspace-override`** overrides `.env` after dotenv load.  
+- After reconnect, the bridge sends **restart succeeded + workspace**, then the **same help text as `/h`**.  
+- **`BRIDGE_RESTART_VIA_FEISHU=0`** disables remote restart.  
+- **`BRIDGE_DEBUG_LOG=1`** logs steps in **`inbox/debug/bridge.log`**.
+
+### Auto push after start / restart
+
+- **Cold start:** After the WebSocket is up, if **`.bridge-last-chat.json`** exists (updated whenever a message is written to `inbox`, **gitignored**), the bridge sends **“bridge started”** plus the control-command help (same as `/h`). If **no one has ever messaged**, nothing is sent.  
+- **`BRIDGE_DISABLE_STARTUP_CONTROL_HELP=1`:** Disables only the **cold-start** push; **`/restart` still sends** the success line + help.  
+
+---
+
 ## 4. Verify it works
 
 1. **DM the bot** or **@ the bot in a group**, send plain text, e.g. `Hi—describe your workspace root in one sentence.`  
 2. The terminal should show `[bridge] queued message`, `[cursor-agent] job start`, `spawn agent`.  
-3. Feishu should show replies within a reasonable time: usually **one** bot bubble (Agent + lark-cli, or bridge fallback). If the user message starts with **`/v` / `/verbos` / `/verbose`**, expect an intro line plus **several** transcript-style bubbles (see above).  
+3. Feishu should show replies within a reasonable time: usually **one** bot bubble (Agent + lark-cli, or bridge fallback). If the user message starts with **`/v` / `/verbos` / `/verbose`**, expect an intro line plus **several** transcript-style bubbles (see **§3.5**). Send **`/h`** anytime for the command summary.  
 
 If Feishu shows canned lines like “已收到，正在本机 Cursor 中处理，请稍候”: **this repo does not send that**. Turn off such **auto-replies** in the Feishu admin UI so they are not confused with real answers.
 

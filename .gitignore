@@ -1,5 +1,8 @@
 node_modules/
 .env
+.bridge-workspace-override
+.bridge-restart-pending.json
+.bridge-last-chat.json
 inbox/*
 !inbox/.gitkeep
 .DS_Store

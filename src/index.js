@@ -1,5 +1,12 @@
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 
+const {
+  applyWorkspaceOverrideFromDisk,
+  maybeHandleBridgeRestartFromFeishu,
+  notifyFeishuAfterRestartIfPending,
+} = require("./bridgeRestart");
+applyWorkspaceOverrideFromDisk();
+
 const http = require("http");
 const path = require("path");
 const lark = require("@larksuiteoapi/node-sdk");
@@ -15,6 +22,12 @@ const {
 } = require("./securityConfig");
 const { validateFeishuMessageLimits } = require("./feishuMessageLimits");
 const { bridgeDebug } = require("./agentDebugLog");
+const {
+  parseHelpCommand,
+  saveLastNotifyChatId,
+  sendControlCommandsHelpToFeishu,
+  notifyColdStartControlCommandsHelp,
+} = require("./bridgeControlCommands");
 
 function validateStartup() {
   if (!envTruthy("CURSOR_AGENT_AUTO")) {
@@ -135,13 +148,36 @@ function createImMessageHandler(client) {
       bridgeDebug(
         `handler write_incoming_ok message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""} open_id=${openId}`,
       );
-      enqueueCursorAgent({
+      saveLastNotifyChatId(payload.chat_id);
+      if (parseHelpCommand(userText)) {
+        try {
+          await sendControlCommandsHelpToFeishu(client, payload.chat_id);
+        } catch (e) {
+          console.error("[bridge] /h 说明发送失败:", e.message);
+        }
+        bridgeDebug(
+          `handler control_help message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""}`,
+        );
+        return {};
+      }
+      const restartHandled = await maybeHandleBridgeRestartFromFeishu(
         client,
-        chatId: payload.chat_id,
+        payload.chat_id,
         userText,
-        messageId: payload.message_id || "",
-        senderOpenId: openId,
-      });
+      );
+      if (restartHandled) {
+        bridgeDebug(
+          `handler bridge_restart message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""}`,
+        );
+      } else {
+        enqueueCursorAgent({
+          client,
+          chatId: payload.chat_id,
+          userText,
+          messageId: payload.message_id || "",
+          senderOpenId: openId,
+        });
+      }
     }
     return {};
   };
@@ -206,6 +242,11 @@ async function startWsMode() {
   bridgeDebug("ws_client started (im.message.receive_v1 registered)");
   console.log("[bridge] mode=ws 长连接已启动（本机主动连飞书，无需公网 URL）");
   console.log(`[bridge] inbox: ${path.join(__dirname, "..", "inbox")}`);
+
+  const didRestartWelcome = await notifyFeishuAfterRestartIfPending(client);
+  if (!didRestartWelcome) {
+    await notifyColdStartControlCommandsHelp(client);
+  }
 
   if (process.env.BRIDGE_HEALTH_DISABLED !== "1") {
     startHealthOnlyServer();
