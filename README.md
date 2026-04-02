@@ -94,6 +94,7 @@ Notes:
 
 - **`CURSOR_AGENT_WORKSPACE`:** If unset, defaults to this repo root; set an **absolute path** to the project you want the agent to edit.  
 - **`CURSOR_AGENT_STREAM_TO_FEISHU=1`:** Streams tool/progress snippets to Feishu; default is off so chats usually show **one concise reply**.  
+- **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`:** Used only with the **“`/v` prefix”** feature below; minimum gap in milliseconds between consecutive transcript bubbles sent to Feishu, default **`350`**; set **`0`** to send as fast as the API queue allows.  
 - **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`:** On by default; the bridge posts via **API only when Feishu delivery is not confirmed** (see **“How replies reach Feishu”** below). If `lark-cli` succeeds, the bridge **does not** duplicate. Set to `0` for **lark-cli only** (may occasionally leave Feishu silent).  
 - **`CURSOR_AGENT_TIMEOUT_MS`:** Max milliseconds per task, then the process is killed; `0` = no limit (e.g. use `600000` for 10 minutes). **Validated at startup** (integer, max ~24h).  
 - **`CURSOR_AGENT_MAX_QUEUE`:** Max queued agent jobs; default `30`, max `500`, `0` = unlimited (not for production). **Validated at startup**; when full, new messages are rejected with a short Feishu notice.  
@@ -112,6 +113,13 @@ Notes:
   - If still not confirmed, a short **nudge** message may be sent.  
 - **Streaming mode (`CURSOR_AGENT_STREAM_TO_FEISHU=1`)**  
   - If lark-cli is confirmed delivered, the final **long assistant tail** is **not** pushed to Feishu (reduces duplication).  
+- **Feishu text prefix: `/v`, `/verbos`, `/verbose` (live transcript to Feishu)**  
+  - If a **plain-text** message starts with one of these prefixes (**case-insensitive**), followed by **whitespace or a newline** and the real request (e.g. `/v summarize README`, `/verbose\nfix one line`), the bridge **strips the prefix** and passes the remainder to the agent. **Prefix-only** messages have no task body.  
+  - For that job, the bridge sends **multiple** Feishu text messages, one **block** at a time, in the **same layout** as **`inbox/debug/agent-*.chat.txt`** (e.g. system, user, thinking, assistant, tool start/complete, result footer). This is a readable “chat transcript” stream while the agent runs.  
+  - This mode is **mutually exclusive** with the **`CURSOR_AGENT_STREAM_TO_FEISHU=1`** 🔧/📝 style progress spam: when the prefix is used, that env-var style progress is **not** sent (avoids duplicate noise).  
+  - Long blocks are split across several Feishu messages using **`BRIDGE_FEISHU_TEXT_MAX_CHARS`**, with continuation markers such as **`（续 2/3）`** in the text.  
+  - **Retry** commands reuse the last **stripped** task text and whether **transcript mode** was on.  
+  - **`inbox` / `LATEST.*` / `cmd-*.json`** still store the **raw** Feishu payload (may include the prefix); the agent sees the stripped text only.  
 - **Images and files**  
   - Built into the agent system prompt (not a separate env var): when the user asks to send an **image/screenshot/file**, default to **lark-cli attachments** (e.g. `+messages-send --image`, per your CLI). Do **not** replace with plain text or links only, and do **not** ask the user which channel to use.
 
@@ -130,7 +138,7 @@ If the port is busy, change `PORT` in `.env` or free the port. If **only** `/hea
 
 1. **DM the bot** or **@ the bot in a group**, send plain text, e.g. `Hi—describe your workspace root in one sentence.`  
 2. The terminal should show `[bridge] queued message`, `[cursor-agent] job start`, `spawn agent`.  
-3. Feishu should show **one** bot reply within a reasonable time (from Agent + lark-cli, or bridge fallback).
+3. Feishu should show replies within a reasonable time: usually **one** bot bubble (Agent + lark-cli, or bridge fallback). If the user message starts with **`/v` / `/verbos` / `/verbose`**, expect an intro line plus **several** transcript-style bubbles (see above).  
 
 If Feishu shows canned lines like “已收到，正在本机 Cursor 中处理，请稍候”: **this repo does not send that**. Turn off such **auto-replies** in the Feishu admin UI so they are not confused with real answers.
 
@@ -210,7 +218,8 @@ Set **`BRIDGE_DEBUG_LOG=1`** in `.env` to write bridge flow events and **full** 
 | File | Contents |
 |------|----------|
 | **`bridge.log`** | Startup, dedupe, `writeIncoming`, enqueue, handler branches (no full user text). |
-| **`agent-<timestamp>-<message_id>.log`** | Per job: metadata, **full user text**, **full prompt**, spawn bin/cwd/**args JSON**, **every stdout line** plus **pretty-printed JSON** for each object (assistant / tool_call “thinking” trail), **stderr** chunks, timeout/exit, `JOB_SUMMARY`. |
+| **`agent-<timestamp>-<message_id>.log`** | Per job: metadata, **user text** (stripped task body), **full prompt**, spawn bin/cwd/**args JSON**, **every stdout line** plus **pretty-printed JSON** for each object (assistant / tool_call “thinking” trail), **stderr** chunks, timeout/exit, `JOB_SUMMARY` (includes `streamTranscriptToFeishu` when `/v`-style prefix was used). |
+| **`agent-<timestamp>-<message_id>.chat.txt`** | Same job: **human-readable transcript** built from `stream-json` (**same block format** as Feishu **`/v`** pushes). If only `/v` is used without `BRIDGE_DEBUG_LOG=1`, this file is **not** written, but Feishu still receives the same structured blocks. |
 
 Optional **`BRIDGE_DEBUG_LOG_DIR`**: absolute path to a custom directory. Logs are sensitive—use only for troubleshooting, then disable and delete.
 
@@ -273,7 +282,7 @@ CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0
 |---------|------------|
 | Startup error asking for `CURSOR_AGENT_AUTO=1` | Set `CURSOR_AGENT_AUTO=1` in `.env` and restart. |
 | Only Feishu auto-reply, no agent answer | Disable irrelevant auto-replies; check `[cursor-agent] failed` in the terminal; confirm `agent login` and `lark-cli` sends. |
-| Long silence after `spawn agent` | Set `CURSOR_AGENT_STREAM_TO_FEISHU=1` to see progress, or `CURSOR_AGENT_TIMEOUT_MS`; avoid `CURSOR_AGENT_MAX_QUEUE=0` unless you understand unbounded queuing. |
+| Long silence after `spawn agent` | Set `CURSOR_AGENT_STREAM_TO_FEISHU=1` for global progress, or use the **`/v`** (or `/verbose`) **message prefix** on a single task for a Feishu transcript stream; or tune `CURSOR_AGENT_TIMEOUT_MS`; avoid `CURSOR_AGENT_MAX_QUEUE=0` unless you understand unbounded queuing. |
 | Startup: must configure `ALLOWED_SENDER_OPEN_IDS` | You set `REQUIRE_SENDER_ALLOWLIST=1` without an allowlist; fill it or turn the flag off. |
 | Startup: `CURSOR_AGENT_MAX_QUEUE` / `TIMEOUT` invalid | Value out of range or not an integer; see §7. |
 | Feishu says queue is full | Pending jobs reached `CURSOR_AGENT_MAX_QUEUE`; wait or raise the cap (max 500). |

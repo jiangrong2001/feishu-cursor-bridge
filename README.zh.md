@@ -93,6 +93,7 @@ CURSOR_AGENT_SANDBOX=disabled
 
 - **`CURSOR_AGENT_WORKSPACE`**：不填则默认为本仓库根目录；建议改成你真正要让 Agent 改代码的目录（绝对路径）。  
 - **`CURSOR_AGENT_STREAM_TO_FEISHU=1`**：打开后会把工具调用等过程摘要推到飞书；默认关闭，飞书里通常只看到**一条简洁答复**。  
+- **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**：仅在与下节 **「`/v` 前缀」** 同时生效时有用；两条「对话摘录」飞书消息之间的最短间隔（毫秒），默认 **`350`**；设为 **`0`** 则尽量连续发送。  
 - **`CURSOR_AGENT_QUIET_BRIDGE_FALLBACK`**：默认开启；**仅当未确认飞书已收到本轮答复**时（见下节「答复如何回到飞书」），由桥接用 **API 补发**模型正文，减少空白；已确认 `lark-cli` 成功则**不**补发，避免重复。若你确定只要 lark-cli、不要桥接代发，可设为 `0`。  
 - **`CURSOR_AGENT_TIMEOUT_MS`**：单条任务最长毫秒数，超时杀进程；`0` 表示不限制。长任务可设 `600000`（10 分钟）。  
 - **`ALLOWED_SENDER_OPEN_IDS`**：逗号分隔的 `ou_xxx`，仅处理这些发送者，降低被陌生人刷队列的风险。  
@@ -110,6 +111,13 @@ CURSOR_AGENT_SANDBOX=disabled
   - 若仍无法确认送达，会发一条简短**兜底提示**（如建议「重试」）。  
 - **过程模式（`CURSOR_AGENT_STREAM_TO_FEISHU=1`）**  
   - 若已确认 lark-cli 成功，**不再**向飞书推送末尾大段模型摘要，避免与 lark-cli 内容重复。  
+- **飞书文本前缀：`/v`、`/verbos`、`/verbose`（对话摘录实时推送）**  
+  - 若用户发送的**纯文本**以任一前缀开头（**不区分大小写**），且前缀后为**空格/换行**再跟正文（示例：`/v 总结 README`、`/verbose\n帮我改一行代码`），桥接会**去掉该前缀**后把剩余内容交给 Agent；**仅前缀无正文**时无有效任务。  
+  - 本轮会在飞书中**按段推送**多条消息，每一段与 **`inbox/debug/agent-*.chat.txt`**（若未开 `BRIDGE_DEBUG_LOG` 则仅内存中同格式）一致，例如：**系统**、**用户**、**思考（模型内部）**、**助手**、**工具 · … · 开始/完成**、**结束** 等，便于实时观察执行过程。  
+  - 与 **`CURSOR_AGENT_STREAM_TO_FEISHU=1`** 的「🔧 / 📝」式进度推送**二选一**：使用本前缀时桥接**不会**再发该环境变量那套摘要，避免两套进度叠在一起。  
+  - 单段过长时按 **`BRIDGE_FEISHU_TEXT_MAX_CHARS`** 自动拆成多条飞书消息，并带 **「（续 n/m）」** 标记。  
+  - 发送「**重试**」等指令时，复用上一条**已去前缀**的正文，并**继承**上一条是否开启了摘录流。  
+  - `inbox` 里 **`LATEST.*` / `cmd-*.json`** 仍保存飞书**原始**内容（可含前缀）；Agent 实际看到的是去前缀后的文本。  
 - **图片与文件**  
   - 桥接内置给 Agent 的说明（非独立环境变量）：用户要**发图/截图/文件**时，**默认用 lark-cli 附件**（如 `+messages-send` 的 `--image` 等，以你本机 lark-cli 为准），**不要**只用纯文字或链接代替上传，**不要**再追问用户发送方式。
 
@@ -128,7 +136,7 @@ npm start
 
 1. 与机器人**单聊**，或在与机器人的**群聊里 @ 机器人**，发一句纯文字，例如：`你好，请用一句话介绍你的工作区路径`。  
 2. 本机终端应出现：`[bridge] queued message`、`[cursor-agent] job start`、`spawn agent`。  
-3. 飞书会话里应在合理时间内出现**一条**来自机器人的文字回复（内容来自 Agent + lark-cli 或桥接补发）。
+3. 飞书会话里应在合理时间内出现回复：默认多为**一条**机器人文字（Agent + lark-cli 或桥接补发）；若本条用户消息以 **`/v` / `/verbos` / `/verbose`** 开头，则会先有一条开场提示，随后**多条**「对话摘录」式消息（见上节）。  
 
 若飞书里出现「已收到，正在本机 Cursor 中处理，请稍候」等固定话术：**不是本仓库发送的**，请到飞书后台关闭同类**自动回复**，以免与真实答案混淆。
 
@@ -208,7 +216,8 @@ LARK_USE_LARK_INTERNATIONAL=1
 | 文件 | 内容 |
 |------|------|
 | **`bridge.log`** | 启动、收包、去重、`writeIncoming`、入队、`im.message` 处理分支等（**不写**用户消息正文，避免与 per-job 日志重复）。 |
-| **`agent-<时间戳>-<message_id>.log`** | 每轮一条：会话元数据、**完整用户原文**、**下发给 Agent 的完整 prompt**、`spawn` 的 bin/cwd/**完整 argv（JSON）**、**stdout 每一行原文**（`stream-json`）；对 JSON 行额外写入 **格式化后的对象**（便于阅读 `assistant` / `tool_call` 等「思考与工具过程」）、**stderr 片段**、超时与错误；末尾 **`JOB_SUMMARY`** 含 `larkCliFeishuOk`（lark-cli 是否按成功特征判定已送达）、`bridgeFeishuDelivered`、`feishuReplyDelivered`（二者任一即视为本轮已对外发信）等。 |
+| **`agent-<时间戳>-<message_id>.log`** | 每轮一条：会话元数据、**完整用户原文**（去前缀后的任务正文）、**下发给 Agent 的完整 prompt**、`spawn` 的 bin/cwd/**完整 argv（JSON）**、**stdout 每一行原文**（`stream-json`）；对 JSON 行额外写入 **格式化后的对象**（便于阅读 `assistant` / `tool_call` 等「思考与工具过程」）、**stderr 片段**、超时与错误；末尾 **`JOB_SUMMARY`** 含 `larkCliFeishuOk`（lark-cli 是否按成功特征判定已送达）、`bridgeFeishuDelivered`、`feishuReplyDelivered`（二者任一即视为本轮已对外发信）、`streamTranscriptToFeishu`（是否 `/v` 类前缀触发的摘录流）等。 |
+| **`agent-<时间戳>-<message_id>.chat.txt`** | 与上条同轮生成：把 `stream-json` 整理成**易读对话块**（与飞书 **`/v`** 推送块**同格式**），便于复盘；未开调试时若仅用 `/v`，此文件**不会**落盘，但飞书侧仍会收到同结构摘录。 |
 
 可选 **`BRIDGE_DEBUG_LOG_DIR`**：指定绝对路径目录（会自动创建）。日志含用户指令与工作区上下文，**生产环境仅在排障时短时开启**，用后关闭并清理目录。
 
@@ -272,7 +281,7 @@ CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0
 |------|----------|
 | 启动报错要求设置 `CURSOR_AGENT_AUTO=1` | 在 `.env` 中加入或改为 `CURSOR_AGENT_AUTO=1` 后重启。 |
 | 只有飞书自动回复、没有 Agent 答案 | 关飞书后台无关自动回复；看终端是否有 `[cursor-agent] failed`；确认 `agent login`；确认 `lark-cli` 能发消息。 |
-| `spawn agent` 后很久无回复 | 设 `CURSOR_AGENT_STREAM_TO_FEISHU=1` 看过程；或设 `CURSOR_AGENT_TIMEOUT_MS`；并确认未误将 `CURSOR_AGENT_MAX_QUEUE` 设为 `0` 导致异常排队。 |
+| `spawn agent` 后很久无回复 | 设 `CURSOR_AGENT_STREAM_TO_FEISHU=1` 看过程；或**单条任务**用消息前缀 **`/v`** 在飞书看对话摘录；或设 `CURSOR_AGENT_TIMEOUT_MS`；并确认未误将 `CURSOR_AGENT_MAX_QUEUE` 设为 `0` 导致异常排队。 |
 | 启动报「必须配置 ALLOWED_SENDER_OPEN_IDS」 | 已设 `REQUIRE_SENDER_ALLOWLIST=1` 但未填白名单；补全或关闭该项。 |
 | 启动报 `CURSOR_AGENT_MAX_QUEUE` / `TIMEOUT` 非法 | 超出允许范围或非整数；见 §七表格。 |
 | 飞书提示「队列已满」 | 待处理任务已达 `CURSOR_AGENT_MAX_QUEUE`；等待执行完毕或调大上限（勿超过 500）。 |
