@@ -53,7 +53,7 @@ CURSOR_AGENT_SANDBOX=disabled
 
 可选：`CURSOR_AGENT_WORKSPACE`（绝对路径，默认可为仓库根）、`ALLOWED_SENDER_OPEN_IDS`、`CURSOR_AGENT_STREAM_TO_FEISHU`、`CURSOR_AGENT_TIMEOUT_MS`、`CURSOR_AGENT_MAX_QUEUE` 等见 [reference.md](reference.md)。
 
-**生产或共享本机时**：必读 README **§七（安全加固与限制项）**——`REQUIRE_SENDER_ALLOWLIST`、`VALIDATE_SENDER_OPEN_ID_FORMAT`、队列/超时启动校验、`BRIDGE_HEALTH_HOST`、`BRIDGE_STRICT_CONFIG` 等。
+**生产或共享本机时**：必读 README **§九（安全加固与限制项）**——`REQUIRE_SENDER_ALLOWLIST`、`VALIDATE_SENDER_OPEN_ID_FORMAT`、队列/超时启动校验、`BRIDGE_HEALTH_HOST`、`BRIDGE_STRICT_CONFIG` 等。
 
 **勿**把真实 Secret 写进对话或提交进 Git；只写入用户本机 `.env`。
 
@@ -66,7 +66,7 @@ npm start
 终端应出现：`mode=ws 长连接已启动`、`Cursor Agent CLI 自动模式已开启`（或同类日志）。  
 让用户在飞书给机器人发一句纯文字；终端应有 `[bridge] queued message`、`[cursor-agent] job start`。
 
-失败时按 README **§八、故障排查**；可先看 `[cursor-agent] failed` 与 `agent login` / `lark-cli`。**答复路径**（lark-cli 成功判定 vs 桥接 API 补发、发图/附件约定）见 README **§三「答复如何回到飞书」**。复盘 Agent 可设 **`BRIDGE_DEBUG_LOG=1`**，见 **§六点五**；`JOB_SUMMARY` 含 `larkCliFeishuOk` / `feishuReplyDelivered`。
+失败时按 README **§十、故障排查**；可先看 `[cursor-agent] failed` 与 `agent login` / `lark-cli`。**答复路径**（lark-cli 成功判定 vs 桥接 API 补发、发图/附件约定）见 README **§三「答复如何回到飞书」**。复盘 Agent 可设 **`BRIDGE_DEBUG_LOG=1`**，见 **§八**；`JOB_SUMMARY` 含 `larkCliFeishuOk` / `feishuReplyDelivered`。
 
 ---
 
