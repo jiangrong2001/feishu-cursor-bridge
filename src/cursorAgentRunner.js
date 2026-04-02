@@ -15,6 +15,11 @@ const {
 const { getFeishuTextMaxChars } = require("./feishuMessageLimits");
 const readline = require("readline");
 const path = require("path");
+const { normalizeFeishuUserText } = require("./queue");
+const {
+  parseRestartFeishuLine,
+  maybeHandleBridgeRestartFromFeishu,
+} = require("./bridgeRestart");
 
 /** @type {Array<{ client: import('@larksuiteoapi/node-sdk').Client; chatId: string; userText: string; messageId?: string; senderOpenId?: string; streamTranscriptToFeishu?: boolean }>} */
 const q = [];
@@ -58,13 +63,14 @@ function isRetryCommandText(userText) {
  * 消息以 /v、/verbos（常见拼写）、/verbose 开头时：去掉前缀，并开启「对话摘录」实时推飞书（格式同 agent-*.chat.txt）。
  */
 function parseTranscriptVerbosePrefix(raw) {
-  const s = String(raw || "");
+  const s = normalizeFeishuUserText(String(raw || ""));
   const lead = s.trimStart();
   const re = /^\/(?:v|verbos|verbose)(?:\s+|\s*$)/i;
   const m = lead.match(re);
   if (!m) return { stripped: s.trim(), streamTranscript: false };
-  const rest = lead.slice(m[0].length).trim();
-  return { stripped: rest, streamTranscript: true };
+  const rest = lead.slice(m[0].length).trimStart();
+  const restNorm = normalizeFeishuUserText(rest);
+  return { stripped: restNorm, streamTranscript: true };
 }
 
 /** 将长文本按飞书单条上限切分，尽量在换行处断开 */
@@ -323,6 +329,27 @@ async function runCursorAgentJob(job) {
     senderOpenId,
     streamTranscriptToFeishu = false,
   } = job;
+
+  const taskBodyForRestart = String(userText || "").trim();
+  let restartLineForJob = taskBodyForRestart;
+  let prJob = parseRestartFeishuLine(taskBodyForRestart);
+  if (!prJob) {
+    prJob = parseRestartFeishuLine(normalizeFeishuUserText(taskBodyForRestart));
+    if (prJob) restartLineForJob = normalizeFeishuUserText(taskBodyForRestart);
+  }
+  if (prJob) {
+    console.log(
+      "[bridge] 跳过 spawn：正文为飞书 /restart（队列残留或旧版入队），改走桥接重启",
+    );
+    bridgeDebug(
+      `run_job intercept restart message_id=${messageId || ""} chat_id=${chatId || ""}`,
+    );
+    await maybeHandleBridgeRestartFromFeishu(client, chatId, restartLineForJob, {
+      streamTranscriptToFeishu: streamTranscriptToFeishu,
+    });
+    return;
+  }
+
   activeAgentJobs++;
   if (activeAgentJobs > 1) {
     console.error(
@@ -725,9 +752,38 @@ function enqueueCursorAgent(p) {
     const { stripped, streamTranscript } = parseTranscriptVerbosePrefix(rawText);
     p.userText = stripped;
     p.streamTranscriptToFeishu = streamTranscript;
+  }
+
+  const taskBody = String(p.userText || "").trim();
+  let restartLine = rawText;
+  let prRestart = parseRestartFeishuLine(rawText);
+  if (!prRestart) {
+    prRestart = parseRestartFeishuLine(taskBody);
+    if (prRestart) restartLine = taskBody;
+  }
+  if (prRestart) {
+    console.log(
+      "[bridge] 飞书 /restart（含可选 /v 前缀），走桥接重启，不交给 Cursor Agent",
+    );
+    bridgeDebug(
+      `enqueue intercept restart chat_id=${p.chatId || ""} message_id=${p.messageId || ""}`,
+    );
+    const streamOpt =
+      p.streamTranscriptToFeishu !== undefined
+        ? !!p.streamTranscriptToFeishu
+        : prRestart.streamTranscript;
+    void maybeHandleBridgeRestartFromFeishu(p.client, p.chatId, restartLine, {
+      streamTranscriptToFeishu: streamOpt,
+    }).catch((e) =>
+      console.error("[bridge] /restart 异步处理失败:", e.message),
+    );
+    return;
+  }
+
+  if (!isRetry) {
     lastEffectiveUserTextByChat.set(p.chatId, {
-      text: stripped,
-      streamTranscript,
+      text: taskBody,
+      streamTranscript: !!p.streamTranscriptToFeishu,
     });
   }
 
@@ -777,4 +833,9 @@ function validateCursorAgentConfig() {
   }
 }
 
-module.exports = { enqueueCursorAgent, validateCursorAgentConfig, workspaceRoot };
+module.exports = {
+  enqueueCursorAgent,
+  validateCursorAgentConfig,
+  workspaceRoot,
+  parseTranscriptVerbosePrefix,
+};

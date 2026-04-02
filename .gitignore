@@ -3,6 +3,7 @@ node_modules/
 .bridge-workspace-override
 .bridge-restart-pending.json
 .bridge-last-chat.json
+.bridge-process.lock
 inbox/*
 !inbox/.gitkeep
 .DS_Store

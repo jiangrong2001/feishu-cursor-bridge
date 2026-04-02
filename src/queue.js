@@ -13,20 +13,55 @@ async function ensureInbox() {
   return dir;
 }
 
-function parseUserText(messageType, contentStr) {
-  if (!contentStr) return "";
-  try {
-    const j = JSON.parse(contentStr);
-    let t = "";
-    if (messageType === "text" && j.text) t = String(j.text);
-    else if (j.text) t = String(j.text);
-    else return contentStr;
-    t = t.replace(/<at[^>]*>[^<]*<\/at>/gi, " ").replace(/\s+/g, " ").trim();
-    return t;
-  } catch {
-    /* ignore */
+/** 飞书端可能插入 NBSP、Narrow NBSP 等，JS 默认 \s 匹配不到，会导致 /v 前缀无法剥离、/restart 误判给 Agent */
+/** U+180E：MVS，trim/\\s 均不处理；若在行首会导致 ^\\s* 与 /^\\/v 整段匹配失败 */
+const FEISHU_SPACE_CHARS =
+  /[\u00a0\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b]/g;
+
+/** ZWJ、字间零宽、双向隔离等：插在 /v 与空格之间时会导致 /(?:v)... 前缀匹配失败，整条 /restart 识别落空 */
+const FEISHU_INVISIBLE_CMD_BREAKERS =
+  /[\u200c\u200d\u200e\u200f\u2060\u2066-\u2069]/g;
+
+/**
+ * 统一空白并修正「/v」与「/restart」粘连，供控制命令解析与 inbox 落盘一致。
+ * @param {string} raw
+ */
+function normalizeFeishuUserText(raw) {
+  let t = String(raw || "")
+    .normalize("NFKC")
+    .replace(/\uFF0F/g, "/")
+    .replace(FEISHU_INVISIBLE_CMD_BREAKERS, "")
+    .replace(FEISHU_SPACE_CHARS, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  t = t.replace(
+    /^(\/(?:v|verbos|verbose))(\/restart\b)/i,
+    (_, a, b) => `${a} ${b}`,
+  );
+  return t.trim();
+}
+
+function parseUserText(messageType, content) {
+  if (content == null || content === "") return "";
+  let j;
+  if (typeof content === "string") {
+    try {
+      j = JSON.parse(content);
+    } catch {
+      return normalizeFeishuUserText(String(content));
+    }
+  } else if (typeof content === "object" && content !== null) {
+    j = content;
+  } else {
+    return normalizeFeishuUserText(String(content));
   }
-  return contentStr;
+  let t = "";
+  if (messageType === "text" && j.text != null) t = String(j.text);
+  else if (j.text != null) t = String(j.text);
+  else if (typeof content === "string") return normalizeFeishuUserText(content);
+  else return "";
+  t = t.replace(/<at[^>]*>[^<]*<\/at>/gi, " ");
+  t = normalizeFeishuUserText(t);
+  return t;
 }
 
 const MAX_IDS = 500;
@@ -150,11 +185,12 @@ lark-cli im +messages-send --as bot --chat-id "${payload.chat_id || "CHAT_ID"}" 
     `writeIncoming ok file=${base}.json message_id=${payload.message_id || ""} user_text_len=${String(userText).length}`,
   );
 
-  return { duplicate: false };
+  return { duplicate: false, effectiveUserText: userText };
 }
 
 module.exports = {
   writeIncoming,
   parseUserText,
+  normalizeFeishuUserText,
   inboxDir,
 };

@@ -4,6 +4,7 @@ const {
   applyWorkspaceOverrideFromDisk,
   maybeHandleBridgeRestartFromFeishu,
   notifyFeishuAfterRestartIfPending,
+  parseRestartFeishuLine,
 } = require("./bridgeRestart");
 applyWorkspaceOverrideFromDisk();
 
@@ -14,7 +15,10 @@ const { writeIncoming, parseUserText } = require("./queue");
 const {
   enqueueCursorAgent,
   validateCursorAgentConfig,
+  workspaceRoot,
+  parseTranscriptVerbosePrefix,
 } = require("./cursorAgentRunner");
+const { acquireBridgeSingletonLock } = require("./bridgeSingletonLock");
 const { envTruthy } = require("./envFlags");
 const {
   validateSecurityAndLimits,
@@ -101,6 +105,29 @@ function buildLarkClient() {
   });
 }
 
+/**
+ * 长连接 v2.0：正文常在 data.event.message，顶层 data.message 可能为空壳或非空但较短；
+ * 用 parseUserText 后的长度择优，避免 handler 里 userText 与 inbox 落盘不一致导致 /restart 解析落空。
+ */
+function pickImMessageFromEvent(data) {
+  const nested = data?.event?.message;
+  const top = data?.message;
+  const textLen = (m) => {
+    if (!m || typeof m !== "object") return 0;
+    const t = parseUserText(m.message_type || "text", m.content ?? "");
+    return String(t || "").trim().length;
+  };
+  const tn = textLen(nested);
+  const tt = textLen(top);
+  if (tn > tt && nested) {
+    bridgeDebug(
+      `im.pick_message use=event.message top_parse_len=${tt} nested_parse_len=${tn}`,
+    );
+  }
+  if (tn > tt) return nested;
+  return top || nested || {};
+}
+
 function createImMessageHandler(client) {
   return async (data) => {
     const senderType = data.sender?.sender_type || "";
@@ -116,11 +143,15 @@ function createImMessageHandler(client) {
       return {};
     }
 
-    const msg = data.message || {};
+    const msg = pickImMessageFromEvent(data);
     const mid = msg.message_id || "";
-    const eid = data.event_id || "";
-    const userText = parseUserText(msg.message_type, msg.content || "");
-    const lockMessageId = !!String(userText).trim();
+    const eid =
+      data.event?.event_id ||
+      data.header?.event_id ||
+      data.event_id ||
+      "";
+    const userTextForLock = parseUserText(msg.message_type, msg.content || "");
+    const lockMessageId = !!String(userTextForLock).trim();
 
     if (!tryClaimDelivery(mid, eid, lockMessageId)) {
       console.log("[bridge] duplicate delivery skipped (sync):", mid || eid);
@@ -131,7 +162,7 @@ function createImMessageHandler(client) {
     }
 
     const payload = {
-      event_id: data.event_id || "",
+      event_id: eid,
       chat_id: msg.chat_id || "",
       message_id: msg.message_id || "",
       message_type: msg.message_type || "",
@@ -144,6 +175,10 @@ function createImMessageHandler(client) {
     if (result.duplicate) {
       console.log("[bridge] duplicate event_id, skipped:", payload.event_id);
     } else {
+      const userText =
+        result.effectiveUserText != null
+          ? String(result.effectiveUserText)
+          : userTextForLock;
       console.log("[bridge] queued message", payload.message_id, "chat", payload.chat_id);
       bridgeDebug(
         `handler write_incoming_ok message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""} open_id=${openId}`,
@@ -160,16 +195,35 @@ function createImMessageHandler(client) {
         );
         return {};
       }
-      const restartHandled = await maybeHandleBridgeRestartFromFeishu(
+      // /restart：在 bridgeRestart 内与「剥 /v」同一套 parseRestartFeishuLine 解析，避免 index 与 runner 两处剥前缀不一致而入队 Agent
+      let restartHandled = await maybeHandleBridgeRestartFromFeishu(
         client,
         payload.chat_id,
         userText,
       );
+      if (!restartHandled && /\/restart\b/i.test(userText)) {
+        const vp = parseTranscriptVerbosePrefix(userText);
+        restartHandled = await maybeHandleBridgeRestartFromFeishu(
+          client,
+          payload.chat_id,
+          vp.stripped,
+          { streamTranscriptToFeishu: vp.streamTranscript },
+        );
+      }
       if (restartHandled) {
         bridgeDebug(
           `handler bridge_restart message_id=${payload.message_id || ""} chat_id=${payload.chat_id || ""}`,
         );
       } else {
+        if (/\/restart\b/i.test(userText)) {
+          const prMiss = parseRestartFeishuLine(userText);
+          bridgeDebug(
+            `handler restart_missed_enqueue_agent message_id=${payload.message_id || ""} parse_ok=${!!prMiss} user_preview=${JSON.stringify(String(userText).slice(0, 120))}`,
+          );
+          console.warn(
+            "[bridge] 本条含 /restart 但桥接未处理，将交给 Agent。请确认仅单实例运行并已拉最新代码；可设 BRIDGE_DEBUG_LOG=1 查 bridge.log",
+          );
+        }
         enqueueCursorAgent({
           client,
           chatId: payload.chat_id,
@@ -254,7 +308,12 @@ async function startWsMode() {
 }
 
 validateStartup();
-bridgeDebug("startup ok, entering startWsMode");
+acquireBridgeSingletonLock();
+console.log("[bridge] Cursor Agent 工作区:", workspaceRoot());
+console.log("[bridge] 桥接代码目录（请确认与 git 工作区一致）:", path.resolve(__dirname, ".."));
+bridgeDebug(
+  "startup ok, entering startWsMode (restart_parse=normalize+zwstrip+mvs180e+restart_suffix, im_handler=strip_fallback)",
+);
 
 startWsMode().catch((e) => {
   console.error("[bridge] ws start failed:", e);

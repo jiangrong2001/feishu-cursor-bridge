@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --check src/envFlags.js && node --check src/securityConfig.js && node --check src/feishuMessageLimits.js && node --check src/agentDebugLog.js && node --check src/bridgeControlCommands.js && node --check src/bridgeRestart.js && node --check src/index.js && node --check src/queue.js && node --check src/cursorAgentRunner.js",
+    "test": "node --check src/envFlags.js && node --check src/securityConfig.js && node --check src/feishuMessageLimits.js && node --check src/agentDebugLog.js && node --check src/bridgeControlCommands.js && node --check src/bridgeSingletonLock.js && node --check src/bridgeRestart.js && node --check src/index.js && node --check src/queue.js && node --check src/cursorAgentRunner.js",
     "push:all": "bash scripts/git-push-all.sh"
   },
   "keywords": [],

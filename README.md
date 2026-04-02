@@ -138,7 +138,7 @@ These are handled by the **bridge** (not enqueued to Cursor Agent). Send each as
 | Command | Effect |
 |---------|--------|
 | **`/h`** or **`/help`** | Bot replies with the **short control-command guide** (may be multiple bubbles). |
-| **`/v` / `/verbos` / `/verbose`** | After whitespace/newline, task text goes to the agent; Feishu receives a **live transcript** in the same block style as `agent-*.chat.txt`. |
+| **`/v` / `/verbos` / `/verbose`** | After whitespace/newline, task text goes to the agent; Feishu receives a **live transcript** in the same block style as `agent-*.chat.txt`. With **`/restart`**, the bridge still handles restart (**no** Agent); Feishu gets **multi-bubble bridge-side steps** (same throttle as **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**). |
 | **`/restart`** | Restarts the bridge Node process; optional **directory path** for a new agent workspace (see below). |
 | **“Retry” phrases** (no slash) | Reuse the last **stripped** task body (including whether `/v` was used). |
 
@@ -148,16 +148,18 @@ These are handled by the **bridge** (not enqueued to Cursor Agent). Send each as
 
 ### `/v`, `/verbos`, `/verbose`
 
-- Same rules as previously documented: mutually exclusive with **`CURSOR_AGENT_STREAM_TO_FEISHU`** style progress; **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**; chunking with **`（续 n/m）`**; **`inbox`** keeps the raw Feishu text.
+- Same rules as previously documented: mutually exclusive with **`CURSOR_AGENT_STREAM_TO_FEISHU`** style progress; **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**; chunking with **`（续 n/m）`**; **`inbox`** keeps the raw Feishu text.  
+- **With `/restart`:** **`/v /restart`** or **`/v /restart <dir>`** is still executed by the **bridge Node** (workspace override + process restart, **not** Cursor headless Agent). Feishu receives **several bubbles** describing bridge steps (resolve path, write **`.bridge-workspace-override`**, fork new Node, etc.), throttled like normal `/v` transcripts.
 
 ### `/restart`
 
-- **Whole-message** `/restart`; trailing text = directory path (absolute, repo-relative, `~/…`).  
+- After stripping an optional **`/v` / `/verbos` / `/verbose` prefix**, the message must start with **`/restart`** (e.g. **`/v /restart /path/to/repo`** ≡ **`/restart /path/to/repo`**; **no** Agent job). With **`/v`**, expect **step-by-step** Feishu bubbles from the bridge; without **`/v`**, a short summary as before. Trailing text = directory path (absolute, repo-relative, `~/…`).  
 - Requires a **supervisor** (pm2, launchd, etc.) to bring the process back.  
 - **`.bridge-workspace-override`** overrides `.env` after dotenv load.  
 - After reconnect, the bridge sends **restart succeeded + workspace**, then the **same help text as `/h`**.  
 - **`BRIDGE_RESTART_VIA_FEISHU=0`** disables remote restart.  
-- **`BRIDGE_DEBUG_LOG=1`** logs steps in **`inbox/debug/bridge.log`**.
+- **`BRIDGE_DEBUG_LOG=1`** logs steps in **`inbox/debug/bridge.log`**.  
+- If Feishu replies read like **directory analysis** instead of **“workspace saved… restarting in ~1s”** (or bridge **step** bubbles), the line was handled as a **Cursor Agent** task (often an **old bridge binary still running**): **`git pull`** and **restart** the Node process running the bridge. Current code intercepts **`/restart` in the IM handler, agent enqueue, and before `spawn agent`**.
 
 ### Auto push after start / restart
 
@@ -320,6 +322,7 @@ CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0
 | Feishu says queue is full | Pending jobs reached `CURSOR_AGENT_MAX_QUEUE`; wait or raise the cap (max 500). |
 | Many `duplicate delivery skipped` lines | Usually normal deduping; if you lose real messages, use a build that only locks `message_id` when body text is non-empty. |
 | Another service shares the same Feishu app | Feishu may deliver events to one long connection only—avoid multiple consumers fighting for the same app. |
+| Feishu shows new workspace after `/restart`, but the next Agent job still uses the old directory | Often **two bridge Node processes** on the same machine (two terminals, or an old process left running). Each opens a WebSocket; messages can hit the **instance that never restarted**. Default **`BRIDGE_SINGLETON_LOCK=1`** makes a second start exit with an error—keep a single bridge process. Set **`BRIDGE_SINGLETON_LOCK=0`** only if you intentionally run multiple instances (not recommended for the same app). |
 | `lark-cli` appears in logs but Feishu has no message | Open `inbox/debug/agent-*.log` → `JOB_SUMMARY`: if `larkCliFeishuOk` is `false`, the bridge should API-fallback; if still empty, check app permissions, `lark-cli`, network; inspect `tool_call` **completed** for `result.failure`. |
 | Trace why the agent replied that way | Set `BRIDGE_DEBUG_LOG=1`, restart; see §6.5 and `JOB_SUMMARY`. |
 

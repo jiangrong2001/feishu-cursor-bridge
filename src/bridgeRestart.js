@@ -8,6 +8,28 @@ const os = require("os");
 const { spawn } = require("child_process");
 const { getFeishuTextMaxChars } = require("./feishuMessageLimits");
 const { bridgeDebug } = require("./agentDebugLog");
+const { releaseBridgeSingletonLock } = require("./bridgeSingletonLock");
+
+/** 与 queue.normalizeFeishuUserText 规则一致；不 require queue，避免与 runner 等形成加载次序问题 */
+const FEISHU_SPACE_CHARS =
+  /[\u00a0\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b]/g;
+
+const FEISHU_INVISIBLE_CMD_BREAKERS =
+  /[\u200c\u200d\u200e\u200f\u2060\u2066-\u2069]/g;
+
+function feishuNormalizeForRestartCmd(raw) {
+  let t = String(raw || "")
+    .normalize("NFKC")
+    .replace(/\uFF0F/g, "/")
+    .replace(FEISHU_INVISIBLE_CMD_BREAKERS, "")
+    .replace(FEISHU_SPACE_CHARS, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  t = t.replace(
+    /^(\/(?:v|verbos|verbose))(\/restart\b)/i,
+    (_, a, b) => `${a} ${b}`,
+  );
+  return t.trim();
+}
 
 function bridgePackageRoot() {
   return path.join(__dirname, "..");
@@ -72,14 +94,51 @@ function restartViaFeishuEnabled() {
 }
 
 /**
+ * 飞书整段文本：规范化后循环去掉 /v、/verbos、/verbose，再识别 /restart（与 index 里「先剥 v 再 parse」双处逻辑合一，避免不一致导致误判给 Agent）。
+ * @returns {null | { rest: string, streamTranscript: boolean }}
+ */
+function parseRestartFeishuLine(text) {
+  let t = feishuNormalizeForRestartCmd(String(text || "")).trim();
+  let streamTranscript = false;
+  const reV = /^\/(?:v|verbos|verbose)(?:\s+|\s*$)/i;
+  for (let i = 0; i < 4; i++) {
+    const lead = t.trimStart();
+    const vm = lead.match(reV);
+    if (!vm) break;
+    streamTranscript = true;
+    t = feishuNormalizeForRestartCmd(lead.slice(vm[0].length)).trim();
+  }
+  let m = t.match(/^\s*\/restart\b(.*)$/is);
+  if (!m) {
+    const rel = t.search(/\/restart\b/i);
+    if (rel < 0) return null;
+    const head = t.slice(0, rel);
+    let h = head.trim();
+    for (let j = 0; j < 4 && h.length; j++) {
+      const vm = h.match(reV);
+      if (!vm) break;
+      streamTranscript = true;
+      h = h.slice(vm[0].length).trimStart();
+    }
+    if (h !== "") return null;
+    const tail = t.slice(rel).trimStart();
+    m = tail.match(/^\/restart\b(.*)$/is);
+    if (!m) return null;
+  }
+  return {
+    rest: String(m[1] || "").trim(),
+    streamTranscript,
+  };
+}
+
+/**
  * @param {string} text
  * @returns {null | { rest: string }}
  */
 function parseRestartCommand(text) {
-  const t = String(text || "").trim();
-  const m = t.match(/^\s*\/restart\b(.*)$/is);
-  if (!m) return null;
-  return { rest: String(m[1] || "").trim() };
+  const pr = parseRestartFeishuLine(text);
+  if (!pr) return null;
+  return { rest: pr.rest };
 }
 
 function resolveWorkspaceCandidate(rest) {
@@ -97,6 +156,22 @@ function truncateFeishuApiText(text) {
   const s = String(text);
   if (s.length <= max) return s;
   return `${s.slice(0, Math.max(1, max - 24))}\n…(截断)`;
+}
+
+/** 与 cursorAgentRunner 中 /v 摘录间隔一致，便于组合「/v /restart」时节奏统一 */
+function transcriptStreamMinIntervalMs() {
+  const n = parseInt(
+    process.env.CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS || "350",
+    10,
+  );
+  if (!Number.isFinite(n)) return 350;
+  return Math.max(0, Math.min(30_000, n));
+}
+
+async function sleepTranscriptGap(stream) {
+  if (!stream) return;
+  const ms = transcriptStreamMinIntervalMs();
+  if (ms > 0) await new Promise((r) => setTimeout(r, ms));
 }
 
 async function sendBridgeText(client, chatId, text) {
@@ -143,6 +218,7 @@ function scheduleBridgeProcessRestart(reason, chatId) {
   writeRestartPendingNotify(chatId, reason);
   const bridgeRoot = bridgePackageRoot();
   setTimeout(() => {
+    releaseBridgeSingletonLock();
     try {
       const child = spawn(process.execPath, process.argv.slice(1), {
         cwd: bridgeRoot,
@@ -225,87 +301,134 @@ async function notifyFeishuAfterRestartIfPending(client) {
 }
 
 /**
+ * @param {string} userText 已 trim；可由调用方先去掉 /v 等摘录前缀后再传入
+ * @param {{ streamTranscriptToFeishu?: boolean }} [options] 为 true 时按段推送桥接执行步骤（与 /v 摘录节奏一致，仍不启动 Cursor Agent）
  * @returns {Promise<boolean>} 是否已处理（为 true 时不应再入队 Agent）
  */
-async function maybeHandleBridgeRestartFromFeishu(client, chatId, userText) {
-  const parsed = parseRestartCommand(userText);
-  if (!parsed) return false;
+async function maybeHandleBridgeRestartFromFeishu(
+  client,
+  chatId,
+  userText,
+  options = {},
+) {
+  const pr = parseRestartFeishuLine(userText);
+  if (!pr) {
+    const s = String(userText || "").trim();
+    if (
+      s.length > 0 &&
+      s.length < 600 &&
+      !/[\r\n]/.test(s) &&
+      /\/restart\b/i.test(s)
+    ) {
+      console.warn(
+        "[bridge] 含 /restart 但未解析为桥接命令（将交给 Agent）。本进程代码目录:",
+        path.resolve(__dirname, ".."),
+      );
+    }
+    return false;
+  }
+
+  const stream =
+    options.streamTranscriptToFeishu !== undefined
+      ? !!options.streamTranscriptToFeishu
+      : pr.streamTranscript;
+
+  const tell = async (text) => {
+    if (!client || !chatId || !text) return;
+    try {
+      await sendBridgeText(client, chatId, text);
+    } catch (e) {
+      console.error("[bridge] 飞书通知失败:", e.message);
+    }
+    await sleepTranscriptGap(stream);
+  };
 
   bridgeDebug(
-    `restart command received chat_id=${chatId || ""} has_path=${!!parsed.rest}`,
+    `restart command received chat_id=${chatId || ""} has_path=${!!pr.rest} stream=${stream}`,
   );
+
+  if (stream) {
+    await tell(
+      [
+        "📜 **/restart** 过程摘录（飞书桥接 **Node** 执行，**非** Cursor headless Agent）",
+        "▸ 已识别为桥接控制命令：可改工作区并重启本桥接进程。",
+      ].join("\n"),
+    );
+  }
 
   if (!restartViaFeishuEnabled()) {
     bridgeDebug("restart rejected (BRIDGE_RESTART_VIA_FEISHU off)");
-    try {
-      await sendBridgeText(
-        client,
-        chatId,
-        "已关闭飞书远程重启。若要开启，请从 .env 中去掉 BRIDGE_RESTART_VIA_FEISHU=0（或 false/off/no）。",
-      );
-    } catch (e) {
-      console.error("[bridge] 发送重启禁用说明失败:", e.message);
-    }
+    await tell(
+      "已关闭飞书远程重启。若要开启，请从 .env 中去掉 BRIDGE_RESTART_VIA_FEISHU=0（或 false/off/no）。",
+    );
     return true;
   }
 
-  const { rest } = parsed;
+  const { rest } = pr;
   if (rest) {
     const candidate = resolveWorkspaceCandidate(rest);
+    if (stream) {
+      await tell(`▸ 参数目录（原文）：${rest}`);
+      await tell(`▸ 解析绝对路径：\n${candidate}`);
+    }
     let stat;
     try {
       stat = fs.statSync(candidate);
     } catch {
       bridgeDebug(`restart abort path_missing rest=${rest.slice(0, 80)}`);
-      try {
-        await sendBridgeText(
-          client,
-          chatId,
+      if (stream) {
+        await tell(
+          `▸ 校验路径：失败（不存在或不可访问），**未重启**。`,
+        );
+      } else {
+        await tell(
           `无法将工作区设为「${rest}」：路径不存在或不可访问。未重启。`,
         );
-      } catch (e) {
-        console.error("[bridge] 发送工作区错误说明失败:", e.message);
       }
       return true;
     }
     if (!stat.isDirectory()) {
       bridgeDebug(`restart abort not_a_directory rest=${rest.slice(0, 80)}`);
-      try {
-        await sendBridgeText(
-          client,
-          chatId,
-          `「${rest}」不是目录。未重启。`,
-        );
-      } catch (e) {
-        console.error("[bridge] 发送工作区错误说明失败:", e.message);
+      if (stream) {
+        await tell(`▸ 校验路径：「${rest}」不是目录，**未重启**。`);
+      } else {
+        await tell(`「${rest}」不是目录。未重启。`);
       }
       return true;
+    }
+    if (stream) {
+      await tell("▸ 校验：路径存在且为目录 ✓");
+      await tell(
+        `▸ 写入 .bridge-workspace-override（一行）：\n${candidate}`,
+      );
     }
     saveWorkspaceOverride(candidate);
     process.env.CURSOR_AGENT_WORKSPACE = candidate;
     bridgeDebug(`restart workspace_saved path=${candidate}`);
-    try {
-      await sendBridgeText(
-        client,
-        chatId,
-        `已保存工作区为:\n${candidate}\n约 1 秒内重启桥接…`,
+    if (stream) {
+      await tell("▸ 已同步本进程环境变量 CURSOR_AGENT_WORKSPACE");
+      await tell(
+        "▸ 即将 fork 新 Node 子进程并退出当前进程（需 pm2 / 终端循环 / launchd 等托管自动拉起）",
       );
-    } catch (e) {
-      console.error("[bridge] 重启前通知飞书失败:", e.message);
+    } else {
+      await tell(`已保存工作区为:\n${candidate}\n约 1 秒内重启桥接…`);
     }
     scheduleBridgeProcessRestart(`工作区已更新为 ${candidate}`, chatId);
     return true;
   }
 
   bridgeDebug("restart no_path scheduling");
-  try {
-    await sendBridgeText(
-      client,
-      chatId,
+  if (stream) {
+    await tell(
+      "▸ 未带路径：工作区沿用当前配置（含 .bridge-workspace-override 若已存在）",
+    );
+    await tell(
+      "▸ 即将 fork 新 Node 子进程并退出当前进程（需进程托管自动拉起）",
+    );
+  } else {
+    await tell(
       "收到 /restart，约 1 秒内重启桥接（工作区沿用当前配置，含 .bridge-workspace-override 若存在）…",
     );
-  } catch (e) {
-    console.error("[bridge] 重启前通知飞书失败:", e.message);
   }
   scheduleBridgeProcessRestart("飞书 /restart（未改工作区）", chatId);
   return true;
@@ -316,6 +439,7 @@ module.exports = {
   maybeHandleBridgeRestartFromFeishu,
   notifyFeishuAfterRestartIfPending,
   parseRestartCommand,
+  parseRestartFeishuLine,
   restartViaFeishuEnabled,
   workspaceOverrideFilePath,
 };

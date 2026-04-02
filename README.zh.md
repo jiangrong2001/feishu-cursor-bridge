@@ -149,18 +149,21 @@ npm start
 
 - 示例：`/v 总结 README`、`/verbose\n帮我改一行代码`。  
 - **仅前缀无正文**时不会入队有效任务。  
+- **与 `/restart` 组合**：`/v /restart` 或 `/v /restart <目录>` 时，**仍由桥接执行**工作区切换与进程重启（**不**启动 Cursor headless Agent）；飞书侧按多段气泡推送**桥接 Node** 的执行步骤（解析路径、写 `.bridge-workspace-override`、`fork` 新进程等），节奏与 **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**（默认 350ms）一致，便于对照普通 `/v` 任务。  
 - 与 **`CURSOR_AGENT_STREAM_TO_FEISHU=1`** 的 🔧/📝 式进度**不叠加**；可调 **`CURSOR_AGENT_TRANSCRIPT_MIN_INTERVAL_MS`**（默认 350ms）。  
 - 单条过长按 **`BRIDGE_FEISHU_TEXT_MAX_CHARS`** 拆条，带「（续 n/m）」。  
 - `inbox` 里仍保留飞书**原文**（可含前缀）。
 
 ### `/restart`（重启桥接 + 可选工作区）
 
-- **整段**匹配 `/restart`；后跟剩余文本则视为**目录路径**（绝对路径、相对**仓库根**、`~/…`）。  
+- **整段**在去掉**可选**的 `/v`、`/verbos`、`/verbose` 前缀后须以 `/restart` 开头（例如 **`/v /restart /Users/you/proj`** 与 **`/restart /Users/you/proj`** 均执行同一套桥接逻辑，**不会**入队 Cursor Agent）。带 **`/v`** 时，飞书会**多段**收到桥接执行过程说明（写 override、调度重启等），便于观察；不带 `/v` 时仍为少量汇总气泡。  
+- 后跟剩余文本则视为**目录路径**（绝对路径、相对**仓库根**、`~/…`）。  
 - 会 **spawn** 新 Node 进程并退出当前进程；需 **pm2 / launchd / 终端循环** 等托管才能自动拉起。  
 - 带路径时写入 **`.bridge-workspace-override`**（**gitignore**），启动时在 `.env` 之后应用，**覆盖** `.env` 里的 `CURSOR_AGENT_WORKSPACE`。  
 - **重启成功**后，会向**发起重启的会话**依次发送：**重启成功 + 当前工作区**，再发**与 `/h` 相同**的控制命令说明。  
 - **`BRIDGE_RESTART_VIA_FEISHU=0`** 可关闭远程重启。  
-- **`BRIDGE_DEBUG_LOG=1`** 时 **`inbox/debug/bridge.log`** 记录 `/restart` 相关步骤。
+- **`BRIDGE_DEBUG_LOG=1`** 时 **`inbox/debug/bridge.log`** 记录 `/restart` 相关步骤。  
+- 若飞书里的回复像在**分析目录、查 inbox** 而不是「已保存工作区…约 1 秒内重启」或 **桥接分步 ▸ 摘录**，说明本条被当成了 **Cursor Agent 任务**（多为**仍在跑旧版桥接**）：请 **`git pull`** 后**重启**运行桥接的 Node 进程（`npm start` / pm2 等）。当前代码在 **收消息、入队、spawn Agent 前**三处拦截 `/restart`，不会交给 Agent。
 
 ### 启动 / 重启后主动推送说明
 
@@ -324,6 +327,7 @@ CURSOR_AGENT_QUIET_BRIDGE_FALLBACK=0
 | 飞书提示「队列已满」 | 待处理任务已达 `CURSOR_AGENT_MAX_QUEUE`；等待执行完毕或调大上限（勿超过 500）。 |
 | `duplicate delivery skipped` 过多 | 多为正常去重；若误判丢失，升级至已修复「仅在有正文时锁 message_id」的版本。 |
 | 与另一套服务共用同一飞书应用 | 飞书可能对同一应用只投递一条长连接，避免多实例抢事件。 |
+| `/restart` 后飞书提示已是新工作区，但下一条 Agent 仍在旧目录（如 `_debug`） | 多为**本机跑了两个桥接 Node**（两个终端 `npm start`、或旧进程未杀又起新进程）：飞书长连接会连上多台，消息落到**未重启**的那台。默认 **`BRIDGE_SINGLETON_LOCK=1`** 会在第二台启动时直接退出；请只保留一个桥接进程。开发确需多开时设 **`BRIDGE_SINGLETON_LOCK=0`**（不推荐连同一飞书应用）。 |
 | 要复盘 Agent 为何那样回复 | 设 `BRIDGE_DEBUG_LOG=1` 重启，查看 `inbox/debug/agent-*.log`（含完整流式 JSON 与 prompt）。 |
 | lark-cli 在日志里跑了但飞书没消息 | 看该轮 `JOB_SUMMARY`：`larkCliFeishuOk` 为 `false` 时桥接应已尝试 API 补发；若仍为空白，查飞书应用权限、本机 `lark-cli` 与网络；对比 `tool_call` **completed** 是否含 `result.failure`。 |
 
